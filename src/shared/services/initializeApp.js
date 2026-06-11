@@ -50,8 +50,25 @@ const g = global.__appSingleton ??= {
   tailscaleAutoResumed: false,
 };
 
+async function applyEnvSettings() {
+  // Env vars are authoritative — always override DB so docker-compose changes take effect on restart
+  const updates = {};
+  if (process.env.AUTH_MODE) updates.authMode = process.env.AUTH_MODE;
+  if (process.env.OIDC_ISSUER_URL) updates.oidcIssuerUrl = process.env.OIDC_ISSUER_URL;
+  // OIDC_CLIENT_ID default "9router" must be explicit — docker-compose default expansion can strip
+  // the leading digit in some shell interpolation contexts, so we also check the env directly
+  const clientId = process.env.OIDC_CLIENT_ID || "9router";
+  updates.oidcClientId = clientId;
+  if (process.env.OIDC_CLIENT_SECRET) updates.oidcClientSecret = process.env.OIDC_CLIENT_SECRET;
+  if (process.env.OIDC_SCOPES) updates.oidcScopes = process.env.OIDC_SCOPES;
+  await updateSettings(updates);
+  console.log("[Init] Applied env settings:", Object.keys(updates).join(", "));
+}
+
 export async function initializeApp() {
   try {
+    await applyEnvSettings();
+
     // Register cleanup + exit-respawn callback immediately so signals and
     // unexpected cloudflared exits are handled even during the deferred window.
     if (!g.signalHandlersRegistered) {
