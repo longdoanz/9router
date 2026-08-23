@@ -1,7 +1,9 @@
 export async function register() {
-  // Run only in the Node.js runtime (not Edge), and not during build
-  if (process.env.NEXT_RUNTIME !== "nodejs") return;
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    const { initConsoleLogCapture } = await import("@/lib/consoleLogBuffer");
+    initConsoleLogCapture();
 
-  const { initializeApp } = await import("./shared/services/initializeApp.js");
-  initializeApp().catch((e) => console.error("[Instrumentation] init failed:", e.message));
+    const { initializeApp } = await import("./shared/services/initializeApp.js");
+    initializeApp().catch((e) => console.error("[Instrumentation] init failed:", e.message));
+  }
 }
