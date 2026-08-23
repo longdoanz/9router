@@ -99,6 +99,27 @@ function sha16(text) {
     return crypto.createHash("sha256").update(text).digest("hex").slice(0, 16);
 }
 
+/**
+ * Derive a deterministic RFC 4122 UUID from an arbitrary string.
+ *
+ * Some upstreams require a real UUID where we would otherwise send a
+ * conversation-stable id (e.g. CommandCode's `threadId`, which rejects
+ * non-UUID values with "Invalid UUID at threadId"). Hashing the id to a UUID
+ * keeps the value both valid and stable per conversation, so prompt cache is
+ * preserved across turns. The result carries the v4 version/variant bit
+ * pattern so downstream UUID parsers accept it.
+ *
+ * @param {string} value - Any conversation-stable id
+ * @returns {string} A valid UUID string, deterministic for the same input
+ */
+export function toStableUuid(value) {
+    const h = crypto.createHash("sha256").update(String(value)).digest().subarray(0, 16);
+    h[6] = (h[6] & 0x0f) | 0x40; // version 4
+    h[8] = (h[8] & 0x3f) | 0x80; // RFC 4122 variant (10xx)
+    const hex = h.toString("hex");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 // Normalize a session id candidate (trim, length cap)
 function normalizeSessionId(value) {
     if (typeof value !== "string") return null;

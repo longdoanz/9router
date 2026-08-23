@@ -1,6 +1,6 @@
 // A2: locks resolveSessionId priority/stickiness (codex/kiro/antigravity centralization).
 import { describe, it, expect, beforeEach } from "vitest";
-import { resolveContinuationId, resolveSessionId, resolveSessionIdentity, resolveClientConversationId, deriveSessionId, clearSessionStore } from "../../open-sse/utils/sessionManager.js";
+import { resolveContinuationId, resolveSessionId, resolveSessionIdentity, resolveClientConversationId, deriveSessionId, toStableUuid, clearSessionStore } from "../../open-sse/utils/sessionManager.js";
 
 // Assistant text must reach ASSISTANT_MIN_LEN (80) to use assistant anchor; else first user message.
 const longAssistant = "x".repeat(80);
@@ -179,6 +179,23 @@ describe("resolveSessionId", () => {
     const a = resolveSessionId({ body: withAssistant, connectionId: "conn1", scope: "kiro" });
     const b = resolveSessionId({ body: withAssistant, connectionId: "conn1", scope: "kiro" });
     expect(a).not.toBe(b);
+  });
+});
+
+describe("toStableUuid", () => {
+  it("produces a valid RFC 4122 UUID for arbitrary input", () => {
+    const re = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+    expect(toStableUuid("claude:abc123")).toMatch(re);
+    expect(toStableUuid("uuid+timestamp")).toMatch(re);
+    expect(toStableUuid("x-session-id")).toMatch(re);
+  });
+
+  it("is deterministic for the same input", () => {
+    expect(toStableUuid("conv-42")).toBe(toStableUuid("conv-42"));
+  });
+
+  it("differs across distinct inputs", () => {
+    expect(toStableUuid("conv-42")).not.toBe(toStableUuid("conv-43"));
   });
 });
 

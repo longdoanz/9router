@@ -28,6 +28,33 @@ describe("openaiToCommandCodeRequest — basic envelope", () => {
   });
 });
 
+describe("openaiToCommandCodeRequest — threadId pinning", () => {
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+  it("emits a valid UUID threadId even when the client session id is not a UUID", () => {
+    const out = openaiToCommandCodeRequest(MODEL, {
+      messages: [{ role: "user", content: "hi" }],
+    }, true, { _clientSessionId: "claude:abc123" });
+
+    expect(out.threadId).toMatch(UUID_RE);
+  });
+
+  it("keeps threadId stable across turns for the same client session id", () => {
+    const creds = { _clientSessionId: "claude:abc123" };
+    const a = openaiToCommandCodeRequest(MODEL, { messages: [{ role: "user", content: "hi" }] }, true, creds);
+    const b = openaiToCommandCodeRequest(MODEL, { messages: [{ role: "user", content: "next turn" }] }, true, creds);
+    expect(a.threadId).toBe(b.threadId);
+  });
+
+  it("falls back to a random valid UUID when no session id is resolved", () => {
+    const out = openaiToCommandCodeRequest(MODEL, {
+      messages: [{ role: "user", content: "hi" }],
+    }, true);
+
+    expect(out.threadId).toMatch(UUID_RE);
+  });
+});
+
 describe("openaiToCommandCodeRequest — system handling", () => {
   it("hoists system messages to params.system (string), not messages[]", () => {
     const out = openaiToCommandCodeRequest(MODEL, {

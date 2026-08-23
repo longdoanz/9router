@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
 import { commandCodeToOpenAIResponse } from "../translator/response/commandcode-to-openai.js";
-import { resolveSessionId } from "../utils/sessionManager.js";
+import { resolveSessionId, toStableUuid } from "../utils/sessionManager.js";
 import { SSE_DONE } from "../utils/sseConstants.js";
 
 /**
@@ -44,7 +44,11 @@ export class CommandCodeExecutor extends BaseExecutor {
     const headers = {
       "Content-Type": "application/json",
       ...(this.config.headers || {}),
-      "x-session-id": this._currentSessionId || randomUUID(),
+      // x-session-id is conversation-stable but must remain a valid UUID
+      // (a resolved id can be "claude:…" or "uuid+timestamp", which upstream
+      // rejects). Hash the stable id to a deterministic UUID; random only as
+      // a last resort.
+      "x-session-id": this._currentSessionId ? toStableUuid(this._currentSessionId) : randomUUID(),
     };
 
     const token = credentials?.apiKey || credentials?.accessToken;
