@@ -13,6 +13,7 @@ const DEFAULT_SETTINGS = {
   tailscaleUrl: "",
   stickyRoundRobinLimit: 3,
   sessionAffinity: false,
+  sessionAffinityTtlMinutes: 30,
   providerStrategies: {},
   quotaVisibility: {},
   comboStrategy: "fallback",

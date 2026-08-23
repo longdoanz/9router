@@ -337,6 +337,24 @@ export default function ProfilePage() {
     }
   };
 
+  const updateSessionAffinityTtl = async (minutes) => {
+    const numMinutes = parseInt(minutes);
+    if (isNaN(numMinutes) || numMinutes < 1) return;
+
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionAffinityTtlMinutes: numMinutes }),
+      });
+      if (res.ok) {
+        setSettings(prev => ({ ...prev, sessionAffinityTtlMinutes: numMinutes }));
+      }
+    } catch (err) {
+      console.error("Failed to update session affinity TTL:", err);
+    }
+  };
+
   const updateRequireLogin = async (requireLogin) => {
     try {
       const res = await fetch("/api/settings", {
@@ -1501,6 +1519,27 @@ export default function ProfilePage() {
                   checked={settings.sessionAffinity === true}
                   onChange={(enabled) => updateSessionAffinity(enabled)}
                   disabled={loading}
+                />
+              </div>
+            )}
+
+            {/* Session Affinity TTL */}
+            {settings.fallbackStrategy === "round-robin" && settings.sessionAffinity === true && (
+              <div className="flex items-start sm:items-center justify-between gap-4 pt-4 border-t border-border/50">
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm sm:text-base">Affinity Idle Timeout</p>
+                  <p className="text-xs sm:text-sm text-text-muted">
+                    Release the pin after this many idle minutes and re-pin to the least-used account
+                  </p>
+                </div>
+                <Input
+                  type="number"
+                  min="1"
+                  max="1440"
+                  value={settings.sessionAffinityTtlMinutes || 30}
+                  onChange={(e) => updateSessionAffinityTtl(e.target.value)}
+                  disabled={loading}
+                  className="w-16 sm:w-20 text-center shrink-0"
                 />
               </div>
             )}

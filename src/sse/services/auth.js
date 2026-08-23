@@ -3,6 +3,7 @@ import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/con
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
+import { affinityTtlMs, resolveAffinityPin } from "./affinity.js";
 import * as log from "../utils/logger.js";
 
 // Mutex to prevent race conditions during account selection
@@ -15,36 +16,6 @@ function githubMonthlyResetMs(status, errorText, provider) {
   if (!String(errorText || "").toLowerCase().includes(GITHUB_MONTHLY_USAGE_LIMIT)) return null;
   const now = new Date();
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
-}
-
-// FNV-1a 32-bit hash — cheap, stable, and spread evenly enough for consistent
-// hashing. We only need a deterministic integer, not cryptographic strength.
-function fnv1a(str) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return h >>> 0;
-}
-
-/**
- * Pin a conversation to a stable account across requests.
- *
- * Round-robin rotates accounts per N requests, which breaks upstream prompt
- * cache: the same conversation can land on a different account between turns.
- * This maps a conversation id (client session/header/body-derived) to a fixed
- * index in the available-connections list so a conversation always reuses the
- * same account while distinct conversations spread evenly across accounts.
- *
- * @param {string|null} conversationId - Stable conversation/session id
- * @param {Array} availableConnections - Account list already filtered for availability
- * @returns {object|null} Pinned connection, or null when there is no id to key on
- */
-export function selectConnectionByAffinity(conversationId, availableConnections) {
-  if (!conversationId || !Array.isArray(availableConnections) || availableConnections.length === 0) return null;
-  const idx = fnv1a(String(conversationId)) % availableConnections.length;
-  return availableConnections[idx];
 }
 
 /**
@@ -162,17 +133,21 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       }
     }
     // Conversation affinity: keep a conversation on one account so upstream
-    // prompt cache survives across turns. Takes precedence over sticky
-    // round-robin — distinct conversations still spread across accounts.
-    // Opt-in per provider (providerStrategies[providerId].sessionAffinity).
+    // prompt cache survives across turns, but release the pin after an idle
+    // timeout and re-pin to the least-recently-used account. Takes precedence
+    // over sticky round-robin. Opt-in per provider
+    // (providerStrategies[providerId].sessionAffinity).
     // When the pinned account later fails/rate-limits, it is excluded from
-    // availableConnections on the retry, so affinity re-hashes over the
-    // remaining accounts — account fallback is preserved.
+    // availableConnections on the retry, so affinity re-pins to another
+    // account — account fallback is preserved.
     if (!connection && strategy === "round-robin" && sessionAffinity && conversationId) {
-      const pinned = selectConnectionByAffinity(conversationId, availableConnections);
-      if (pinned) {
-        connection = pinned;
-        log.info("AUTH", `${provider} | affinity → ${pinned.id?.slice(0, 8)} (${pinned.name || pinned.email || "unnamed"})`);
+      const pinnedId = resolveAffinityPin(conversationId, availableConnections, affinityTtlMs(providerOverride, settings));
+      if (pinnedId) {
+        const pinned = availableConnections.find(c => c.id === pinnedId);
+        if (pinned) {
+          connection = pinned;
+          log.info("AUTH", `${provider} | affinity → ${pinned.id?.slice(0, 8)} (${pinned.name || pinned.email || "unnamed"})`);
+        }
       }
     }
     if (connection) {
