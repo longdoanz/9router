@@ -1,6 +1,6 @@
 // A2: locks resolveSessionId priority/stickiness (codex/kiro/antigravity centralization).
 import { describe, it, expect, beforeEach } from "vitest";
-import { resolveContinuationId, resolveSessionId, resolveSessionIdentity, deriveSessionId, clearSessionStore } from "../../open-sse/utils/sessionManager.js";
+import { resolveContinuationId, resolveSessionId, resolveSessionIdentity, resolveClientConversationId, deriveSessionId, clearSessionStore } from "../../open-sse/utils/sessionManager.js";
 
 // Assistant text must reach ASSISTANT_MIN_LEN (80) to use assistant anchor; else first user message.
 const longAssistant = "x".repeat(80);
@@ -178,6 +178,65 @@ describe("resolveSessionId", () => {
     const withAssistant = { messages: [{ role: "user", content: "same user" }, { role: "assistant", content: "y".repeat(80) }] };
     const a = resolveSessionId({ body: withAssistant, connectionId: "conn1", scope: "kiro" });
     const b = resolveSessionId({ body: withAssistant, connectionId: "conn1", scope: "kiro" });
+    expect(a).not.toBe(b);
+  });
+});
+
+describe("resolveClientConversationId", () => {
+  it("returns null when the client sends no session/conversation id and no assistant history", () => {
+    expect(resolveClientConversationId({}, { messages: [{ role: "user", content: "hi" }] }, "commandcode")).toBe(null);
+  });
+
+  it("returns the client x-session-id header verbatim", () => {
+    const got = resolveClientConversationId(
+      { "x-session-id": "client-sess-123" },
+      { messages: [{ role: "user", content: "hi" }] },
+      "commandcode"
+    );
+    expect(got).toBe("client-sess-123");
+  });
+
+  it("returns the client conversation_id body field", () => {
+    const got = resolveClientConversationId(
+      {},
+      { conversation_id: "conv-42", messages: [{ role: "user", content: "hi" }] },
+      "commandcode"
+    );
+    expect(got).toBe("conv-42");
+  });
+
+  it("derives a stable id from accumulated assistant text when no explicit id is sent", () => {
+    const body = {
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "y".repeat(80) },
+      ],
+    };
+    const a = resolveClientConversationId({}, body, "commandcode");
+    const b = resolveClientConversationId({}, body, "commandcode");
+    expect(a).not.toBe(null);
+    expect(a).toBe(b);
+  });
+
+  it("returns null for kiro scope when no explicit id (headerless kiro must not pin)", () => {
+    const body = {
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "y".repeat(80) },
+      ],
+    };
+    expect(resolveClientConversationId({}, body, "kiro")).toBe(null);
+  });
+
+  it("scope isolation: same history yields different ids across scopes", () => {
+    const body = {
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "y".repeat(80) },
+      ],
+    };
+    const a = resolveClientConversationId({}, body, "commandcode");
+    const b = resolveClientConversationId({}, body, "codex");
     expect(a).not.toBe(b);
   });
 });

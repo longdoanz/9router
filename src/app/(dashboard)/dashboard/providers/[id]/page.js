@@ -64,6 +64,7 @@ export default function ProviderDetailPage() {
   const [bulkUpdatingProxy, setBulkUpdatingProxy] = useState(false);
   const [providerStrategy, setProviderStrategy] = useState(null);
   const [providerStickyLimit, setProviderStickyLimit] = useState("");
+  const [providerSessionAffinity, setProviderSessionAffinity] = useState(false);
   const [thinkingMode, setThinkingMode] = useState("auto");
   const [autoPing, setAutoPing] = useState({ enabled: false, connections: {} });
   const [suggestedModels, setSuggestedModels] = useState([]);
@@ -313,6 +314,7 @@ export default function ProviderDetailPage() {
       const override = (settingsData.providerStrategies || {})[providerId] || {};
       setProviderStrategy(override.fallbackStrategy || null);
       setProviderStickyLimit(override.stickyRoundRobinLimit != null ? String(override.stickyRoundRobinLimit) : "1");
+      setProviderSessionAffinity(override.sessionAffinity === true);
       // Load per-provider thinking config
       const thinkingCfg = (settingsData.providerThinking || {})[providerId] || {};
       setThinkingMode(thinkingCfg.mode || "auto");
@@ -362,7 +364,7 @@ export default function ProviderDetailPage() {
     }
   };
 
-  const saveProviderStrategy = async (strategy, stickyLimit) => {
+  const saveProviderStrategy = async (strategy, stickyLimit, sessionAffinity = null) => {
     try {
       const settingsRes = await fetch("/api/settings", { cache: "no-store" });
       const settingsData = settingsRes.ok ? await settingsRes.json() : {};
@@ -374,6 +376,10 @@ export default function ProviderDetailPage() {
       if (strategy === "round-robin" && stickyLimit !== "") {
         override.stickyRoundRobinLimit = Number(stickyLimit) || 3;
       }
+      // Preserve existing sessionAffinity unless explicitly passed (non-null).
+      // Explicit null means "turn off" when the caller provides it.
+      if (sessionAffinity != null) override.sessionAffinity = !!sessionAffinity;
+      else if (current[providerId]?.sessionAffinity != null) override.sessionAffinity = current[providerId].sessionAffinity;
 
       const updated = { ...current };
       if (Object.keys(override).length === 0) {
@@ -397,12 +403,17 @@ export default function ProviderDetailPage() {
     const sticky = enabled ? (providerStickyLimit || "1") : providerStickyLimit;
     if (enabled && !providerStickyLimit) setProviderStickyLimit("1");
     setProviderStrategy(strategy);
-    saveProviderStrategy(strategy, sticky);
+    saveProviderStrategy(strategy, sticky, enabled ? providerSessionAffinity : null);
   };
 
   const handleStickyLimitChange = (value) => {
     setProviderStickyLimit(value);
-    saveProviderStrategy("round-robin", value);
+    saveProviderStrategy("round-robin", value, providerSessionAffinity);
+  };
+
+  const handleSessionAffinityToggle = (enabled) => {
+    setProviderSessionAffinity(enabled);
+    saveProviderStrategy("round-robin", providerStickyLimit || "1", enabled);
   };
 
   const saveThinkingConfig = async (mode) => {
@@ -1485,6 +1496,15 @@ export default function ProviderDetailPage() {
                       onChange={(e) => handleStickyLimitChange(e.target.value)}
                       placeholder="1"
                       className="w-14 px-2 py-1 text-xs border border-border rounded-md bg-background focus:outline-none focus:border-primary"
+                    />
+                  </div>
+                )}
+                {providerStrategy === "round-robin" && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-text-muted font-medium">Session Affinity</span>
+                    <Toggle
+                      checked={providerSessionAffinity}
+                      onChange={handleSessionAffinityToggle}
                     />
                   </div>
                 )}

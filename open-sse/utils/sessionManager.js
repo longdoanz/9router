@@ -220,6 +220,31 @@ export function resolveSessionId(opts = {}) {
     return resolveSessionIdentity(opts).sessionId;
 }
 
+/**
+ * Resolve a conversation id for account-affinity pinning.
+ *
+ * Unlike resolveSessionId, this NEVER falls back to a generated id: it returns
+ * null when nothing stable is available, so callers keep their normal
+ * account-selection behavior (e.g. sticky round-robin) instead of pinning a
+ * conversation to a random account on every request.
+ *
+ * Sources, in priority order:
+ *   1. Client-supplied session/conversation id (headers or body fields).
+ *   2. A hash of the accumulated assistant text — stable across a multi-turn
+ *      conversation even when the client sends no explicit session id.
+ *
+ * @param {object} [headers] - Raw client request headers
+ * @param {object} [body] - Parsed request body
+ * @param {string} [scope] - Provider scope to isolate cache keys across providers
+ * @returns {string|null} Stable conversation id, or null
+ */
+export function resolveClientConversationId(headers, body, scope = "") {
+    const client = extractClientSessionId(headers, body, scope);
+    if (client) return client;
+    if (scope === "kiro") return null;
+    return assistantTextSessionId(scope, body);
+}
+
 export function resolveContinuationId({ sessionId, connectionId, scope = "", ephemeral = false } = {}) {
     if (ephemeral) return crypto.randomUUID();
     const key = `${scope}:${connectionId || ""}:${sessionId || ""}`;

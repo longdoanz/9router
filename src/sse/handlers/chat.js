@@ -19,6 +19,7 @@ import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActi
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
+import { resolveClientConversationId } from "open-sse/utils/sessionManager.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
@@ -224,8 +225,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   let lastError = null;
   let lastStatus = null;
 
+  // Conversation-stable id for account affinity. Pins only when the client
+  // actually forwards a session/conversation id — otherwise we leave account
+  // selection to the configured strategy (sticky round-robin / fill-first).
+  const conversationId = resolveClientConversationId(clientRawRequest?.headers, body, provider);
+
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, { conversationId });
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {

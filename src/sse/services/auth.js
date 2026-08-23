@@ -17,6 +17,36 @@ function githubMonthlyResetMs(status, errorText, provider) {
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
 }
 
+// FNV-1a 32-bit hash — cheap, stable, and spread evenly enough for consistent
+// hashing. We only need a deterministic integer, not cryptographic strength.
+function fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+/**
+ * Pin a conversation to a stable account across requests.
+ *
+ * Round-robin rotates accounts per N requests, which breaks upstream prompt
+ * cache: the same conversation can land on a different account between turns.
+ * This maps a conversation id (client session/header/body-derived) to a fixed
+ * index in the available-connections list so a conversation always reuses the
+ * same account while distinct conversations spread evenly across accounts.
+ *
+ * @param {string|null} conversationId - Stable conversation/session id
+ * @param {Array} availableConnections - Account list already filtered for availability
+ * @returns {object|null} Pinned connection, or null when there is no id to key on
+ */
+export function selectConnectionByAffinity(conversationId, availableConnections) {
+  if (!conversationId || !Array.isArray(availableConnections) || availableConnections.length === 0) return null;
+  const idx = fnv1a(String(conversationId)) % availableConnections.length;
+  return availableConnections[idx];
+}
+
 /**
  * Get provider credentials from localDb
  * Filters out unavailable accounts and returns the selected account based on strategy
@@ -30,6 +60,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     ? excludeConnectionIds
     : (excludeConnectionIds ? new Set([excludeConnectionIds]) : new Set());
   const preferredConnectionId = options?.preferredConnectionId || null;
+  const conversationId = options?.conversationId || null;
   // Acquire mutex to prevent race conditions
   const currentMutex = selectionMutex;
   let resolveMutex;
@@ -117,6 +148,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     // Per-provider strategy overrides global setting
     const providerOverride = (settings.providerStrategies || {})[providerId] || {};
     const strategy = providerOverride.fallbackStrategy || settings.fallbackStrategy || "fill-first";
+    // Session affinity: per-provider override wins, else global setting.
+    const sessionAffinity = providerOverride.sessionAffinity != null
+      ? providerOverride.sessionAffinity === true
+      : settings.sessionAffinity === true;
 
     let connection;
     // Pin to preferred connection if specified and available
@@ -124,6 +159,20 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       connection = availableConnections.find((c) => c.id === preferredConnectionId);
       if (connection) {
         log.info("AUTH", `${provider} | pinned to ${connection.id?.slice(0, 8)} (${connection.name || connection.email || "unnamed"})`);
+      }
+    }
+    // Conversation affinity: keep a conversation on one account so upstream
+    // prompt cache survives across turns. Takes precedence over sticky
+    // round-robin — distinct conversations still spread across accounts.
+    // Opt-in per provider (providerStrategies[providerId].sessionAffinity).
+    // When the pinned account later fails/rate-limits, it is excluded from
+    // availableConnections on the retry, so affinity re-hashes over the
+    // remaining accounts — account fallback is preserved.
+    if (!connection && strategy === "round-robin" && sessionAffinity && conversationId) {
+      const pinned = selectConnectionByAffinity(conversationId, availableConnections);
+      if (pinned) {
+        connection = pinned;
+        log.info("AUTH", `${provider} | affinity → ${pinned.id?.slice(0, 8)} (${pinned.name || pinned.email || "unnamed"})`);
       }
     }
     if (connection) {

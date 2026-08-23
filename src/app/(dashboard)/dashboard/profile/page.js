@@ -322,6 +322,21 @@ export default function ProfilePage() {
     }
   };
 
+  const updateSessionAffinity = async (enabled) => {
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionAffinity: enabled }),
+      });
+      if (res.ok) {
+        setSettings(prev => ({ ...prev, sessionAffinity: enabled }));
+      }
+    } catch (err) {
+      console.error("Failed to update session affinity:", err);
+    }
+  };
+
   const updateRequireLogin = async (requireLogin) => {
     try {
       const res = await fetch("/api/settings", {
@@ -1469,6 +1484,23 @@ export default function ProfilePage() {
                   onChange={(e) => updateStickyLimit(e.target.value)}
                   disabled={loading}
                   className="w-16 sm:w-20 text-center shrink-0"
+                />
+              </div>
+            )}
+
+            {/* Session Affinity */}
+            {settings.fallbackStrategy === "round-robin" && (
+              <div className="flex items-start sm:items-center justify-between gap-4 pt-4 border-t border-border/50">
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm sm:text-base">Session Affinity</p>
+                  <p className="text-xs sm:text-sm text-text-muted">
+                    Pin a conversation to one account so upstream prompt cache survives across turns
+                  </p>
+                </div>
+                <Toggle
+                  checked={settings.sessionAffinity === true}
+                  onChange={(enabled) => updateSessionAffinity(enabled)}
+                  disabled={loading}
                 />
               </div>
             )}
