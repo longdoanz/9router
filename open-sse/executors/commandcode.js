@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
 import { commandCodeToOpenAIResponse } from "../translator/response/commandcode-to-openai.js";
+import { resolveSessionId } from "../utils/sessionManager.js";
 import { SSE_DONE } from "../utils/sseConstants.js";
 
 /**
@@ -18,9 +19,23 @@ import { SSE_DONE } from "../utils/sseConstants.js";
 export class CommandCodeExecutor extends BaseExecutor {
   constructor() {
     super("commandcode", PROVIDERS.commandcode);
+    this._currentSessionId = null;
   }
 
   transformRequest(model, body, stream, credentials) {
+    // Resolve a conversation-stable session id before buildHeaders runs
+    // (base.execute calls transformRequest first). A fresh random x-session-id
+    // per request would make the upstream treat every turn as a new session and
+    // drop its prompt cache. Prefer the id already resolved by translateRequest,
+    // falling back to the shared session manager for the raw client headers.
+    this._currentSessionId =
+      credentials?._clientSessionId ||
+      resolveSessionId({
+        headers: credentials?.rawHeaders,
+        body,
+        connectionId: credentials?.connectionId,
+        scope: "commandcode",
+      });
     body.stream = true;
     return body;
   }
@@ -29,7 +44,7 @@ export class CommandCodeExecutor extends BaseExecutor {
     const headers = {
       "Content-Type": "application/json",
       ...(this.config.headers || {}),
-      "x-session-id": randomUUID(),
+      "x-session-id": this._currentSessionId || randomUUID(),
     };
 
     const token = credentials?.apiKey || credentials?.accessToken;

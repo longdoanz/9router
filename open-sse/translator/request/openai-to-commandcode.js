@@ -133,7 +133,7 @@ function convertTools(tools) {
   return result.length ? result : undefined;
 }
 
-export function openaiToCommandCodeRequest(model, body, stream /* , credentials */) {
+export function openaiToCommandCodeRequest(model, body, stream, credentials) {
   const { messages, system } = convertMessages(body.messages);
   const params = {
     model,
@@ -151,8 +151,14 @@ export function openaiToCommandCodeRequest(model, body, stream /* , credentials 
 
   const today = new Date().toISOString().slice(0, 10);
 
+  // Pin the thread to the conversation-stable session id (already resolved by
+  // translateRequest into credentials._clientSessionId). A fresh random threadId
+  // per request would force the upstream to treat every turn as a new thread and
+  // drop prompt cache. Fall back to a random id only when none was resolved.
+  const threadId = credentials?._clientSessionId || randomUUID();
+
   return {
-    threadId: randomUUID(),
+    threadId,
     memory: "",
     config: {
       workingDir: process.cwd(),
