@@ -4,7 +4,8 @@ import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { FORMATS } from "../../translator/formats.js";
 import { PROVIDERS } from "../../config/providers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
-import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
+import { ROLE, RESPONSES_ITEM, CLAUDE_BLOCK } from "../../translator/schema/index.js";
+import { fromOpenAIFinish } from "../../translator/concerns/finishReason.js";
 
 // Responses-API providers (e.g. codex) may emit SSE without content-type + use Responses output shape
 const isResponsesProvider = (p) => PROVIDERS[p]?.format === FORMATS.OPENAI_RESPONSES;
@@ -101,6 +102,55 @@ function chatCompletionToResponses(responseBody, customToolNames = null) {
       input_tokens: usage.prompt_tokens || usage.input_tokens || 0,
       output_tokens: usage.completion_tokens || usage.output_tokens || 0,
       total_tokens: usage.total_tokens || (usage.prompt_tokens || 0) + (usage.completion_tokens || 0),
+    },
+  };
+}
+
+/**
+ * Convert an OpenAI Chat Completions body into an Anthropic Message.
+ * Inlined mirror of nonStreamingHandler's openAICompletionToClaudeMessage —
+ * importing it back would be a cycle (that module imports from this one).
+ */
+function chatCompletionToClaudeMessage(responseBody) {
+  if (!responseBody?.choices?.[0]) return responseBody;
+  const choice = responseBody.choices[0];
+  const message = choice.message || {};
+  const content = [];
+
+  const reasoning = message.reasoning_content || message.provider_specific_fields?.reasoning_content || "";
+  if (reasoning) content.push({ type: CLAUDE_BLOCK.THINKING, thinking: reasoning });
+  if (typeof message.content === "string" && message.content.length > 0) {
+    content.push({ type: CLAUDE_BLOCK.TEXT, text: message.content });
+  }
+  for (const toolCall of message.tool_calls || []) {
+    const fn = toolCall.function || {};
+    let input = {};
+    try {
+      input = typeof fn.arguments === "string" ? JSON.parse(fn.arguments) : (fn.arguments || {});
+    } catch {
+      input = {};
+    }
+    content.push({
+      type: CLAUDE_BLOCK.TOOL_USE,
+      id: toolCall.id || `toolu_${Date.now()}_${content.length}`,
+      name: fn.name || toolCall.name || "",
+      input,
+    });
+  }
+  if (content.length === 0) content.push({ type: CLAUDE_BLOCK.TEXT, text: "" });
+
+  const usage = responseBody.usage || {};
+  return {
+    id: String(responseBody.id || `msg_${Date.now()}`).replace(/^chatcmpl-/, ""),
+    type: "message",
+    role: ROLE.ASSISTANT,
+    model: responseBody.model || "unknown",
+    content,
+    stop_reason: fromOpenAIFinish(choice.finish_reason, FORMATS.CLAUDE),
+    stop_sequence: null,
+    usage: {
+      input_tokens: usage.prompt_tokens || usage.input_tokens || 0,
+      output_tokens: usage.completion_tokens || usage.output_tokens || 0,
     },
   };
 }
@@ -347,9 +397,16 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
     // lost on the non-streaming return path. Inlined (not imported from
     // nonStreamingHandler.js) to avoid a circular import: nonStreamingHandler
     // already imports parseSSEToOpenAIResponse from this module.
-    const finalBody = sourceFormat === FORMATS.OPENAI_RESPONSES
-      ? chatCompletionToResponses(parsed, customToolNames)
-      : parsed;
+    //
+    // Same for a Claude-format client (e.g. Claude Code): it speaks the Anthropic
+    // Messages API, so a chat.completion body is rejected outright. Convert it to
+    // an Anthropic Message instead of returning the wrong shape.
+    let finalBody = parsed;
+    if (sourceFormat === FORMATS.OPENAI_RESPONSES) {
+      finalBody = chatCompletionToResponses(parsed, customToolNames);
+    } else if (sourceFormat === FORMATS.CLAUDE) {
+      finalBody = chatCompletionToClaudeMessage(parsed);
+    }
 
     return { success: true, response: new Response(JSON.stringify(finalBody), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
   } catch (err) {
