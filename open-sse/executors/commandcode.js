@@ -320,7 +320,25 @@ function wrapNdjsonAsOpenAISse(streamBody, model, originalResponse = null) {
       if (trimmed) {
         emitChunks(commandCodeToOpenAIResponse(trimmed, state), controller);
       }
-      controller.enqueue(encoder.encode(SSE_DONE));
+      // Only a real `finish` event closes the turn. Emitting [DONE] after a
+      // stream that simply stopped leaves no trace of the truncation: the
+      // non-streaming path reads [DONE] as "upstream completed" and serves the
+      // partial answer with stop_reason=end_turn, so a client cannot tell it
+      // apart from a finished turn. When the translator never saw a terminal
+      // event, surface the failure instead of a fake completion.
+      if (state.finishReason) {
+        controller.enqueue(encoder.encode(SSE_DONE));
+      } else if (!state.errored) {
+        // The upstream reported an error already → its chunk is the failure
+        // signal; do not stack a second one on top.
+        console.error("[CommandCode] upstream stream ended without a terminal event");
+        emitChunks({
+          error: {
+            message: "[CommandCode error: upstream stream ended before the model finished its turn]",
+            type: "server_error",
+          },
+        }, controller);
+      }
     },
   });
 

@@ -162,21 +162,46 @@ function chatCompletionToClaudeMessage(responseBody) {
 export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
   const chunks = [];
   let streamError = null;
+  let sawTerminal = false;
 
   for (const line of String(rawSSE || "").split("\n")) {
     const trimmed = line.trim();
     if (!trimmed.startsWith("data:")) continue;
     const payload = trimmed.slice(5).trim();
-    if (!payload || payload === "[DONE]") continue;
+    // `[DONE]` is the OpenAI end-of-stream marker: its presence proves the
+    // upstream finished the turn rather than being cut off mid-flight.
+    if (payload === "[DONE]") { sawTerminal = true; continue; }
+    if (!payload) continue;
     try {
       const chunk = JSON.parse(payload);
       if (chunk?.error) streamError = chunk.error;
-      else chunks.push(chunk);
+      else {
+        // A finish_reason on any chunk is the other terminal signal: it means
+        // the model closed its turn, so the stream is complete even if the
+        // provider omits [DONE].
+        if (chunk?.choices?.some((c) => c?.finish_reason)) sawTerminal = true;
+        chunks.push(chunk);
+      }
     } catch { /* ignore malformed lines */ }
   }
 
   if (streamError) return { error: streamError };
   if (chunks.length === 0) return null;
+
+  // Content arrived but the stream never signalled completion. Reporting this
+  // as a normal completion is the failure mode this guard exists to stop: the
+  // caller would return the partial turn with stop_reason=end_turn, and a
+  // client cannot tell a truncated answer from a finished one — it stops
+  // instead of retrying. Surface it as a retryable upstream fault instead.
+  if (!sawTerminal) {
+    return {
+      error: {
+        message: "Upstream stream ended before the model finished its turn",
+        type: "server_error",
+        truncated: true,
+      },
+    };
+  }
 
   const first = chunks[0];
   const contentParts = [];
@@ -333,8 +358,14 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
       return { success: true, response: new Response(JSON.stringify(finalResp), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
     } catch (err) {
-      console.error("[ChatCore] Responses API SSE→JSON failed:", err);
-      return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");
+      // Same reasoning as the chat-completions branch below: the read of the
+      // upstream body is the failing step, so the message names that instead of
+      // blaming the conversion that never ran.
+      console.error("[ChatCore] Responses API stream read failed:", err);
+      return createErrorResult(
+        HTTP_STATUS.BAD_GATEWAY,
+        `Upstream stream failed: ${err?.message || "connection error"}`
+      );
     }
   }
 
@@ -344,9 +375,14 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
     if (parsed.error) {
+      // Keep BAD_GATEWAY: the gateway received a response it could not complete,
+      // which is what 502 means, and the account/combo loop treats 502 and 503
+      // identically (same fallback, same cooldown). Only the MESSAGE changes —
+      // it previously named our conversion step while the real cause was the
+      // upstream stream itself.
       return createErrorResult(
         HTTP_STATUS.BAD_GATEWAY,
-        parsed.error.message || "Upstream SSE stream failed"
+        parsed.error.message || "Upstream stream failed"
       );
     }
 
@@ -410,7 +446,14 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
     return { success: true, response: new Response(JSON.stringify(finalBody), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
   } catch (err) {
-    console.error("[ChatCore] Chat Completions SSE→JSON failed:", err);
-    return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");
+    // Reading the upstream body is what fails here (a reset connection rejects
+    // .text()), not the conversion that follows it. Naming the conversion sent
+    // readers hunting in the wrong file. The status stays BAD_GATEWAY — the
+    // client receives no usable body, which is exactly what 502 describes.
+    console.error("[ChatCore] Upstream SSE read failed:", err);
+    return createErrorResult(
+      HTTP_STATUS.BAD_GATEWAY,
+      `Upstream stream failed: ${err?.message || "connection error"}`
+    );
   }
 }

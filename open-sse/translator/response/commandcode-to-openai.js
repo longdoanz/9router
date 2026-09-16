@@ -171,6 +171,12 @@ export function commandCodeToOpenAIResponse(chunk, state) {
     }
     case "finish": {
       const finishReason = state.finishReason || mapFinishReason(event.finishReason || "stop");
+      // Record the terminal reason on the state, not just on the emitted chunk:
+      // `finish` is the upstream's end-of-turn signal and can arrive without a
+      // preceding `finish-step`. The stream wrapper reads state.finishReason to
+      // decide whether the turn actually completed; without this assignment a
+      // legitimately finished stream looks truncated.
+      state.finishReason = finishReason;
       const finalChunk = makeChunk(state, {}, finishReason);
       const totalUsage = event.totalUsage || state.usage;
       const usage = toOpenAIUsage(totalUsage, "commandcode");
