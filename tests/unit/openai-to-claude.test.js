@@ -204,3 +204,49 @@ describe("openaiToClaudeResponse", () => {
     });
   });
 });
+
+describe("openaiToClaudeResponse — error chunk", () => {
+  it("emits an Anthropic error event and stops, never a clean message_stop", () => {
+    // A mid-stream upstream failure arrives here as an error chunk from
+    // commandcode-to-openai.js. Emitting message_stop would tell the client the
+    // truncated turn completed successfully, so it would never retry.
+    const state = { messageStartSent: true, textBlockIndex: 0, textBlockStarted: true };
+    const result = openaiToClaudeResponse(
+      { error: { message: "[CommandCode error: Upstream stream ended before terminal chunk]", type: "server_error" } },
+      state
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0].type).toBe("error");
+    expect(result[0].error.message).toContain("Upstream stream ended before terminal chunk");
+    // server_error is not in Anthropic's vocabulary; a transient upstream
+    // failure maps to overloaded_error, which clients do retry.
+    expect(result[0].error.type).toBe("overloaded_error");
+  });
+
+  it("defaults the error type when the upstream omits one", () => {
+    const result = openaiToClaudeResponse({ error: "boom" }, {});
+    expect(result[0].error.type).toBe("api_error");
+    expect(result[0].error.message).toBe("boom");
+  });
+
+  it("maps upstream-specific error types onto Anthropic ones", () => {
+    const cases = [
+      ["rate_limit_error", "rate_limit_error"],
+      ["billing_error", "permission_error"],
+      ["insufficient_quota", "permission_error"],
+      ["authentication_error", "authentication_error"],
+      ["some_unknown_error", "api_error"],
+    ];
+    for (const [upstream, expected] of cases) {
+      const result = openaiToClaudeResponse({ error: { type: upstream, message: "x" } }, {});
+      expect(result[0].error.type).toBe(expected);
+    }
+  });
+
+  it("does not emit message_start for an error arriving before any content", () => {
+    const state = {};
+    const result = openaiToClaudeResponse({ error: { message: "insufficient credits" } }, state);
+    expect(result.every(e => e.type === "error")).toBe(true);
+    expect(state.messageStartSent).toBeUndefined();
+  });
+});

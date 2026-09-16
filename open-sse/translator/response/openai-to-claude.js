@@ -10,6 +10,45 @@ import { extractReasoningText } from "../concerns/reasoning.js";
 // is then a no-op. Kept intentionally; do NOT couple to request's empty prefix.
 const CLAUDE_OAUTH_TOOL_PREFIX = "proxy_";
 
+// Anthropic's documented error `type` values. An upstream error surfaced through
+// the OpenAI pivot carries its own vocabulary ("server_error", "billing_error"),
+// which is not a subset of this list — passing it through unmapped hands the
+// client a type it does not recognise.
+const ANTHROPIC_ERROR_TYPES = new Set([
+  "invalid_request_error", "authentication_error", "permission_error",
+  "not_found_error", "request_too_large", "rate_limit_error",
+  "api_error", "overloaded_error",
+]);
+
+// Upstream error type → Anthropic error type. Ordered: first substring hit wins.
+const ANTHROPIC_ERROR_MAP = [
+  ["rate_limit", "rate_limit_error"],
+  ["authentication", "authentication_error"],
+  ["unauthorized", "authentication_error"],
+  ["permission", "permission_error"],
+  ["forbidden", "permission_error"],
+  ["billing", "permission_error"],
+  ["quota", "permission_error"],
+  ["not_found", "not_found_error"],
+  ["invalid_request", "invalid_request_error"],
+  ["too_large", "request_too_large"],
+  // Transient upstream failures — the one class worth retrying.
+  ["server_error", "overloaded_error"],
+  ["overloaded", "overloaded_error"],
+  ["unavailable", "overloaded_error"],
+  ["timeout", "overloaded_error"],
+];
+
+function toAnthropicErrorType(type) {
+  if (!type) return "api_error";
+  if (ANTHROPIC_ERROR_TYPES.has(type)) return type;
+  const lower = String(type).toLowerCase();
+  for (const [needle, mapped] of ANTHROPIC_ERROR_MAP) {
+    if (lower.includes(needle)) return mapped;
+  }
+  return "api_error";
+}
+
 // Sanitize tool call arguments to fix bad params from non-Anthropic models
 function sanitizeToolArgs(toolName, argsJson) {
   try {
@@ -69,7 +108,26 @@ function stopTextBlock(state, results) {
 
 // Convert OpenAI stream chunk to Claude format
 export function openaiToClaudeResponse(chunk, state) {
-  if (!chunk || !chunk.choices?.[0]) return null;
+  if (!chunk) return null;
+
+  // Error chunk injected by an upstream translator (e.g. commandcode NDJSON
+  // carrying a mid-stream `error` event). Emit the Anthropic error event and
+  // stop producing anything else: the previous message_start / content_block_*
+  // sequence must not be completed with a message_stop, or the client reads
+  // the truncated turn as a successful answer. Checked before the choices
+  // guard below — an error chunk carries no choices at all.
+  if (chunk.error) {
+    const err = typeof chunk.error === "string" ? { message: chunk.error } : chunk.error;
+    return [{
+      type: "error",
+      error: {
+        type: toAnthropicErrorType(err.type),
+        message: err.message || "Upstream stream failed",
+      }
+    }];
+  }
+
+  if (!chunk.choices?.[0]) return null;
 
   const results = [];
   const choice = chunk.choices[0];

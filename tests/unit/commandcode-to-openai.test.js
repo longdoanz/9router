@@ -116,12 +116,40 @@ describe("commandcode-to-openai — finish", () => {
 });
 
 describe("commandcode-to-openai — error event", () => {
-  it("stringifies object errors so client sees readable message", () => {
+  it("emits an error chunk instead of injecting the failure as assistant text", () => {
     const { chunks } = feed([
       { type: "error", error: { type: "server_error", message: "Boom" } },
     ]);
-    const text = chunks[0].choices[0].delta.content;
-    expect(text).toContain("Boom");
-    expect(text).not.toContain("[object Object]");
+    expect(chunks.length).toBe(1);
+    expect(chunks[0].error).toBeDefined();
+    expect(chunks[0].error.message).toContain("Boom");
+    // Nothing may be emitted as model content: a client reads assistant text as
+    // the answer, so an error written there ends the turn silently.
+    expect(chunks[0].choices).toBeUndefined();
+  });
+
+  it("does not append an error string to preceding text output", () => {
+    const { chunks } = feed([
+      { type: "text-delta", text: "partial answer" },
+      { type: "error", error: "Upstream stream ended before terminal chunk" },
+    ]);
+    const last = chunks[chunks.length - 1];
+    expect(last.error.message).toContain("Upstream stream ended before terminal chunk");
+    expect(last.choices).toBeUndefined();
+  });
+
+  it("falls back to a plain message when the error value is not an object", () => {
+    const { chunks } = feed([
+      { type: "error", error: "Upstream stream ended before terminal chunk" },
+    ]);
+    expect(chunks[0].error.message).toBe("[CommandCode error: Upstream stream ended before terminal chunk]");
+    expect(chunks[0].error.type).toBe("server_error");
+  });
+
+  it("uses the upstream error type when provided", () => {
+    const { chunks } = feed([
+      { type: "error", error: { type: "rate_limit_error", message: "slow down" } },
+    ]);
+    expect(chunks[0].error.type).toBe("rate_limit_error");
   });
 });

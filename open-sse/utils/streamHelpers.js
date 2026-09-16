@@ -35,6 +35,11 @@ export function parseSSELine(line, format = null) {
 
 // Check if chunk has valuable content (not empty)
 export function hasValuableContent(chunk, format) {
+  // Error chunks carry no delta/choices at all, so every format-specific test
+  // below rejects them. They must survive: dropping one silently truncates the
+  // turn with no signal to the client that anything failed.
+  if (chunk?.error) return true;
+
   // OpenAI format
   if (format === FORMATS.OPENAI && chunk.choices?.[0]?.delta) {
     const delta = chunk.choices[0].delta;

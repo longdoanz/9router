@@ -17,7 +17,7 @@
  */
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
-import { ROLE, OPENAI_BLOCK, OPENAI_FINISH } from "../schema/index.js";
+import { ROLE, OPENAI_BLOCK } from "../schema/index.js";
 import { buildChunk } from "../concerns/chunk.js";
 import { toOpenAIUsage } from "../concerns/usage.js";
 import { reasoningDelta } from "../concerns/reasoning.js";
@@ -52,8 +52,22 @@ const mapFinishReason = (reason) => toOpenAIFinish(reason, "commandcode");
 export function commandCodeToOpenAIResponse(chunk, state) {
   if (!chunk) return null;
 
+  // A failure is terminal: everything the upstream emits afterwards is
+  // post-mortem noise. Without this latch a trailing `finish` event would emit
+  // a clean finish chunk, and openai-to-claude.js would then close the turn
+  // with message_stop — the exact "looks successful" signal this changed
+  // behaviour exists to prevent.
+  if (state.errored) return null;
+
   // Already-OpenAI chunk: pass through
   if (chunk && typeof chunk === "object" && chunk.object === "chat.completion.chunk") {
+    return chunk;
+  }
+
+  // Error chunk (emitted by this translator, or already shaped this way by an
+  // executor). It carries no `.type`, so the guard at the bottom would drop it —
+  // pass it through untouched for openai-to-claude.js to turn into an error event.
+  if (chunk && typeof chunk === "object" && chunk.error) {
     return chunk;
   }
 
@@ -165,11 +179,20 @@ export function commandCodeToOpenAIResponse(chunk, state) {
       break;
     }
     case "error": {
-      state.finishReason = OPENAI_FINISH.STOP;
+      // The upstream failed after the response had already started streaming.
+      // Appending the message to the assistant text and closing with a clean
+      // `stop` (the previous behaviour) makes clients read the failure as the
+      // model's final answer: the turn ends there and nothing is retried. Emit
+      // an error chunk instead — openai-to-claude.js turns it into a
+      // protocol-legal Anthropic `error` event, and the stream terminates
+      // without a message_stop so the client can tell the turn was incomplete.
       const errVal = event.error ?? event.message ?? "unknown";
-      const errStr = typeof errVal === "string" ? errVal : JSON.stringify(errVal);
-      out.push(makeChunk(state, { content: `\n\n[CommandCode error: ${errStr}]` }));
-      out.push(makeChunk(state, {}, OPENAI_FINISH.STOP));
+      const errMessage = typeof errVal === "string"
+        ? errVal
+        : (errVal?.message || JSON.stringify(errVal));
+      const errType = (errVal && typeof errVal === "object" && errVal.type) || "server_error";
+      state.errored = true;
+      out.push({ error: { message: `[CommandCode error: ${errMessage}]`, type: errType } });
       break;
     }
     // Silently ignore: start, start-step, reasoning-start, reasoning-end, text-start, text-end,
