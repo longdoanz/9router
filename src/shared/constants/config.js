@@ -59,6 +59,22 @@ export const CONSOLE_LOG_CONFIG = {
   pollIntervalMs: 1000,
 };
 
+// Telegram error forwarding. Mirrors kiro/telegram_notifier.py in the gateway
+// repo so both services share one channel without one drowning out the other.
+export const TELEGRAM_CONFIG = {
+  // Marker fallback for error lines that do NOT arrive at error level: the
+  // app's own logger.error() (src/sse/utils/logger.js) writes "❌" through
+  // console.log, and src/mitm/logger.js prefixes "[MITM] ❌". Genuine
+  // console.error() calls are caught by their level instead, so they need no
+  // marker here.
+  errorPattern: /(❌|\[MITM\]\s*❌)/,
+  DEDUP_WINDOW_MS: 180000,     // same line at most once per 3 minutes
+  RATE_WINDOW_MS: 60000,       // send-rate window
+  MAX_SENDS_PER_WINDOW: 10,    // ceiling within RATE_WINDOW_MS
+  QUEUE_MAX: 200,              // drop new entries past this, never evict old ones
+  FLUSH_INTERVAL_MS: 1000,     // queue drain cadence
+};
+
 // Client-side store TTL: how long fetched data stays fresh before re-fetching
 export const CLIENT_STORE_TTL_MS = 60000;
 

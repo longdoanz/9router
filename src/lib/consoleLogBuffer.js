@@ -22,6 +22,7 @@ if (!state.emitter) {
 }
 
 if (!state.pendingLines) state.pendingLines = [];
+if (!state.pendingRecords) state.pendingRecords = [];
 if (!state.flushTimer) state.flushTimer = null;
 
 const FLUSH_INTERVAL_MS = 100;
@@ -32,7 +33,13 @@ function flushPendingLines() {
   if (!state.pendingLines.length) return;
 
   const lines = state.pendingLines.splice(0, state.pendingLines.length);
+  // Records carry the level the line was logged at, which `logs` cannot: the
+  // dashboard renders a flat string list. The notifier needs the level to tell
+  // a real console.error() apart from request chatter that merely mentions an
+  // error, so both views are emitted from the same batch.
+  const records = state.pendingRecords.splice(0, state.pendingRecords.length);
   state.emitter.emit("lines", lines);
+  state.emitter.emit("records", records);
 }
 
 function scheduleFlush() {
@@ -62,13 +69,14 @@ function formatArg(arg) {
   }
 }
 
-function appendLine(line) {
+function appendLine(line, level) {
   state.logs.push(line);
   const maxLines = CONSOLE_LOG_CONFIG.maxLines;
   if (state.logs.length > maxLines) {
     state.logs = state.logs.slice(-maxLines);
   }
   state.pendingLines.push(line);
+  state.pendingRecords.push({ level, line });
   if (state.pendingLines.length >= MAX_BATCH_LINES) {
     if (state.flushTimer) {
       clearTimeout(state.flushTimer);
@@ -86,7 +94,7 @@ export function initConsoleLogCapture() {
   for (const level of consoleLevels) {
     state.originals[level] = console[level];
     console[level] = (...args) => {
-      appendLine(toLogLine(level, args));
+      appendLine(toLogLine(level, args), level);
       state.originals[level](...args);
     };
   }

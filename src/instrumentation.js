@@ -13,5 +13,10 @@ export async function register() {
 
     const { startModelCatalogSync } = await import("@/lib/modelCatalog/sync.js");
     startModelCatalogSync();
+
+    // Forwards ERROR-level console output to Telegram. No-op unless
+    // TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set.
+    const { telegramNotifier } = await import("@/lib/telegramNotifier.js");
+    telegramNotifier.start();
   }
 }
