@@ -14,6 +14,34 @@ const RING_CAP = 50;
 const CONN_CACHE_TTL_MS = 30 * 1000;
 const PERIOD_MS = { "24h": 86400000, "7d": 604800000, "30d": 2592000000, "60d": 5184000000 };
 
+// usageHistory grows forever otherwise — nothing else in this repo deletes from
+// it. Rows older than the cutoff are already rolled up into usageDaily, which is
+// what every period longer than 24h reads, so pruning them costs no chart data.
+// Default is comfortably above the longest chart period (60d).
+const DEFAULT_USAGE_RETENTION_DAYS = 90;
+const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+
+// Epoch milliseconds from the stored ISO-8601 text, computed inside SQLite so
+// bucketing can happen in a GROUP BY instead of a row-by-row loop in JS.
+// strftime('%s') truncates to the second, so the millisecond part is added back
+// from the text: 'YYYY-MM-DDTHH:MM:SS.mmmZ' keeps it at offset 21..23. A
+// timestamp written without milliseconds yields '' there, which falls back to 0.
+const EPOCH_MS_SQL =
+  "(CAST(strftime('%s', timestamp) AS INTEGER) * 1000 " +
+  "+ CAST(COALESCE(NULLIF(substr(timestamp, 21, 3), ''), '0') AS INTEGER))";
+
+// Cached-token counts only exist inside the `tokens` JSON blob — there is no
+// column for them — so reading them in SQL is what lets the blob stay out of
+// the result set instead of being JSON.parse-d once per row.
+// json_extract raises on malformed JSON, hence the json_valid guard; a NULL or
+// unparseable blob yields NULL and then 0, matching parseJson's `{}` fallback.
+const jsonToken = (path) => `CASE WHEN json_valid(tokens) = 1 THEN json_extract(tokens, '${path}') END`;
+const TOKENS_PROMPT_SQL = `COALESCE(${jsonToken("$.prompt_tokens")}, 0)`;
+const TOKENS_COMPLETION_SQL = `COALESCE(${jsonToken("$.completion_tokens")}, 0)`;
+// NULLIF mirrors JS `||`, which falls through on 0 and not just on undefined.
+const TOKENS_CACHED_SQL =
+  `COALESCE(NULLIF(${jsonToken("$.cached_tokens")}, 0), ${jsonToken("$.cache_read_input_tokens")}, 0)`;
+
 // In-memory state shared across Next.js modules
 if (!global._pendingRequests) global._pendingRequests = { byModel: {}, byAccount: {} };
 if (!global._lastErrorProvider) global._lastErrorProvider = { provider: "", ts: 0 };
@@ -25,6 +53,7 @@ if (!global._pendingTimers) global._pendingTimers = {};
 if (!global._recentRing) global._recentRing = { items: [], initialized: false };
 if (!global._connectionMapCache) global._connectionMapCache = { map: {}, ts: 0 };
 if (!global._statsEmitTimers) global._statsEmitTimers = { pending: null, update: null };
+if (!global._usagePruneState) global._usagePruneState = { lastRun: 0 };
 
 const pendingRequests = global._pendingRequests;
 const lastErrorProvider = global._lastErrorProvider;
@@ -34,6 +63,37 @@ const connCache = global._connectionMapCache;
 const statsEmitTimers = global._statsEmitTimers;
 
 export const statsEmitter = global._statsEmitter;
+
+function getUsageRetentionDays() {
+  const raw = parseInt(process.env.USAGE_RETENTION_DAYS || String(DEFAULT_USAGE_RETENTION_DAYS), 10);
+  return Number.isFinite(raw) ? raw : DEFAULT_USAGE_RETENTION_DAYS;
+}
+
+/**
+ * Drop usageHistory rows older than the retention window.
+ *
+ * Runs at most once an hour and outside the insert transaction, so it never
+ * lengthens the write lock on the request hot path. Failures are swallowed —
+ * losing a prune cycle is harmless, losing a usage record is not. Set
+ * USAGE_RETENTION_DAYS=0 to keep everything.
+ */
+function pruneUsageHistory(db) {
+  const days = getUsageRetentionDays();
+  if (days <= 0) return;
+
+  const now = Date.now();
+  if (now - global._usagePruneState.lastRun < PRUNE_INTERVAL_MS) return;
+  global._usagePruneState.lastRun = now;
+
+  try {
+    const cutoff = new Date(now - days * 86400000).toISOString();
+    const removed = db.run(`DELETE FROM usageHistory WHERE timestamp < ?`, [cutoff]);
+    const count = removed?.changes ?? 0;
+    if (count > 0) console.log(`[DB] Pruned ${count} usageHistory rows older than ${days}d`);
+  } catch (e) {
+    console.warn(`[DB] usageHistory prune skipped: ${e.message}`);
+  }
+}
 
 function scheduleStatsEvent(event, delayMs = 150) {
   const key = event === "update" ? "update" : "pending";
@@ -307,6 +367,7 @@ export async function saveRequestUsage(entry) {
     if (inserted) {
       pushToRing(entry);
       scheduleStatsEvent("update", 250);
+      pruneUsageHistory(db);
     }
   } catch (e) {
     console.error("Failed to save usage stats:", e);
@@ -422,25 +483,29 @@ export async function getUsageStats(period = "all") {
   const now = new Date();
   const currentMinuteStart = new Date(Math.floor(now.getTime() / 60000) * 60000);
   const tenMinutesAgo = new Date(currentMinuteStart.getTime() - 9 * 60 * 1000);
-  const bucketMap = {};
   for (let i = 0; i < 10; i++) {
-    const ts = currentMinuteStart.getTime() - (9 - i) * 60 * 1000;
-    bucketMap[ts] = { requests: 0, promptTokens: 0, completionTokens: 0, cost: 0 };
-    stats.last10Minutes.push(bucketMap[ts]);
+    stats.last10Minutes.push({ requests: 0, promptTokens: 0, completionTokens: 0, cost: 0 });
   }
+  // Bucket in SQL. tenMinutesAgo is minute-aligned, so the bucket index is the
+  // index into last10Minutes directly.
   const recent10 = db.all(
-    `SELECT timestamp, promptTokens, completionTokens, cost FROM usageHistory WHERE timestamp >= ? AND timestamp <= ?`,
-    [tenMinutesAgo.toISOString(), now.toISOString()]
+    `SELECT CAST((${EPOCH_MS_SQL} - ?) / 60000 AS INTEGER) AS idx,
+            COUNT(*) AS requests,
+            SUM(COALESCE(promptTokens, 0)) AS promptTokens,
+            SUM(COALESCE(completionTokens, 0)) AS completionTokens,
+            SUM(COALESCE(cost, 0)) AS cost
+       FROM usageHistory
+      WHERE timestamp >= ? AND timestamp <= ?
+      GROUP BY idx`,
+    [tenMinutesAgo.getTime(), tenMinutesAgo.toISOString(), now.toISOString()]
   );
   for (const r of recent10) {
-    const tt = new Date(r.timestamp).getTime();
-    const minuteStart = Math.floor(tt / 60000) * 60000;
-    if (bucketMap[minuteStart]) {
-      bucketMap[minuteStart].requests++;
-      bucketMap[minuteStart].promptTokens += r.promptTokens || 0;
-      bucketMap[minuteStart].completionTokens += r.completionTokens || 0;
-      bucketMap[minuteStart].cost += r.cost || 0;
-    }
+    const bucket = stats.last10Minutes[r.idx];
+    if (!bucket) continue;
+    bucket.requests = r.requests || 0;
+    bucket.promptTokens = r.promptTokens || 0;
+    bucket.completionTokens = r.completionTokens || 0;
+    bucket.cost = r.cost || 0;
   }
 
   const useDailySummary = period !== "24h" && period !== "today";
@@ -573,16 +638,37 @@ export async function getUsageStats(period = "all") {
     } else {
       cutoff = new Date(Date.now() - PERIOD_MS["24h"]).toISOString();
     }
+    // Every one of the five breakdowns below groups by some subset of these
+    // columns, so one GROUP BY over the full tuple feeds all of them from a
+    // single scan. The dashboard SSE recalculates this on every request, and
+    // the row-at-a-time version made JS work proportional to traffic; now it is
+    // proportional to the number of distinct provider/model/account/key/endpoint
+    // combinations, which is small and does not grow with request volume.
+    // A handful of fields are written only when an entry is first created
+    // (notably byApiKey["local-no-key"].rawModel), so which row arrives first
+    // is observable. Ungrouped, this query walked idx_uh_ts — a DESC index —
+    // so the newest row came first; ordering groups by their newest row
+    // reproduces that exactly.
     const filtered = db.all(
-      `SELECT timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, tokens FROM usageHistory WHERE timestamp >= ?`,
+      `SELECT provider, model, connectionId, apiKey, endpoint,
+              COUNT(*) AS requests,
+              SUM(${TOKENS_PROMPT_SQL}) AS promptTokens,
+              SUM(${TOKENS_COMPLETION_SQL}) AS completionTokens,
+              SUM(${TOKENS_CACHED_SQL}) AS cachedTokens,
+              SUM(COALESCE(cost, 0)) AS cost,
+              MAX(timestamp) AS timestamp
+         FROM usageHistory
+        WHERE timestamp >= ?
+        GROUP BY provider, model, connectionId, apiKey, endpoint
+        ORDER BY MAX(timestamp) DESC`,
       [cutoff]
     );
 
     for (const r of filtered) {
-      const tokens = parseJson(r.tokens, {}) || {};
-      const promptTokens = tokens.prompt_tokens || 0;
-      const completionTokens = tokens.completion_tokens || 0;
-      const cachedTokens = tokens.cached_tokens || tokens.cache_read_input_tokens || 0;
+      const requests = r.requests || 0;
+      const promptTokens = r.promptTokens || 0;
+      const completionTokens = r.completionTokens || 0;
+      const cachedTokens = r.cachedTokens || 0;
       const entryCost = r.cost || 0;
       const providerDisplayName = providerNodeNameMap[r.provider] || r.provider;
 
@@ -592,7 +678,7 @@ export async function getUsageStats(period = "all") {
       stats.totalCost += entryCost;
 
       if (!stats.byProvider[r.provider]) stats.byProvider[r.provider] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0 };
-      stats.byProvider[r.provider].requests++;
+      stats.byProvider[r.provider].requests += requests;
       stats.byProvider[r.provider].promptTokens += promptTokens;
       stats.byProvider[r.provider].completionTokens += completionTokens;
       stats.byProvider[r.provider].cachedTokens += cachedTokens;
@@ -602,7 +688,7 @@ export async function getUsageStats(period = "all") {
       if (!stats.byModel[modelKey]) {
         stats.byModel[modelKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel: r.model, provider: providerDisplayName, lastUsed: r.timestamp };
       }
-      stats.byModel[modelKey].requests++;
+      stats.byModel[modelKey].requests += requests;
       stats.byModel[modelKey].promptTokens += promptTokens;
       stats.byModel[modelKey].completionTokens += completionTokens;
       stats.byModel[modelKey].cachedTokens += cachedTokens;
@@ -615,7 +701,7 @@ export async function getUsageStats(period = "all") {
         if (!stats.byAccount[accountKey]) {
           stats.byAccount[accountKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel: r.model, provider: providerDisplayName, connectionId: r.connectionId, accountName, lastUsed: r.timestamp };
         }
-        stats.byAccount[accountKey].requests++;
+        stats.byAccount[accountKey].requests += requests;
         stats.byAccount[accountKey].promptTokens += promptTokens;
         stats.byAccount[accountKey].completionTokens += completionTokens;
         stats.byAccount[accountKey].cachedTokens += cachedTokens;
@@ -632,14 +718,14 @@ export async function getUsageStats(period = "all") {
           stats.byApiKey[akKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel: r.model, provider: providerDisplayName, apiKeyMasked, keyName, apiKeyKey: apiKeyMasked, lastUsed: r.timestamp };
         }
         const ake = stats.byApiKey[akKey];
-        ake.requests++; ake.promptTokens += promptTokens; ake.completionTokens += completionTokens; ake.cachedTokens += cachedTokens; ake.cost += entryCost;
+        ake.requests += requests; ake.promptTokens += promptTokens; ake.completionTokens += completionTokens; ake.cachedTokens += cachedTokens; ake.cost += entryCost;
         if (new Date(r.timestamp) > new Date(ake.lastUsed)) ake.lastUsed = r.timestamp;
       } else {
         if (!stats.byApiKey["local-no-key"]) {
           stats.byApiKey["local-no-key"] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel: r.model, provider: providerDisplayName, apiKeyMasked: null, keyName: "Local (No API Key)", apiKeyKey: "local-no-key", lastUsed: r.timestamp };
         }
         const ake = stats.byApiKey["local-no-key"];
-        ake.requests++; ake.promptTokens += promptTokens; ake.completionTokens += completionTokens; ake.cachedTokens += cachedTokens; ake.cost += entryCost;
+        ake.requests += requests; ake.promptTokens += promptTokens; ake.completionTokens += completionTokens; ake.cachedTokens += cachedTokens; ake.cost += entryCost;
         if (new Date(r.timestamp) > new Date(ake.lastUsed)) ake.lastUsed = r.timestamp;
       }
 
@@ -649,7 +735,7 @@ export async function getUsageStats(period = "all") {
         stats.byEndpoint[epKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, endpoint, rawModel: r.model, provider: providerDisplayName, lastUsed: r.timestamp };
       }
       const epe = stats.byEndpoint[epKey];
-      epe.requests++; epe.promptTokens += promptTokens; epe.completionTokens += completionTokens; epe.cachedTokens += cachedTokens; epe.cost += entryCost;
+      epe.requests += requests; epe.promptTokens += promptTokens; epe.completionTokens += completionTokens; epe.cachedTokens += cachedTokens; epe.cost += entryCost;
       if (new Date(r.timestamp) > new Date(epe.lastUsed)) epe.lastUsed = r.timestamp;
     }
   }
@@ -673,17 +759,19 @@ export async function getChartData(period = "7d") {
     const buckets = Array.from({ length: bucketCount }, (_, i) => ({ label: labelFn(startTime + i * bucketMs), tokens: 0, cost: 0 }));
 
     const rows = db.all(
-      `SELECT timestamp, promptTokens, completionTokens, cost FROM usageHistory WHERE timestamp >= ?`,
-      [new Date(startTime).toISOString()]
+      `SELECT CAST((${EPOCH_MS_SQL} - ?) / ? AS INTEGER) AS idx,
+              SUM(COALESCE(promptTokens, 0) + COALESCE(completionTokens, 0)) AS tokens,
+              SUM(COALESCE(cost, 0)) AS cost
+         FROM usageHistory
+        WHERE timestamp >= ? AND timestamp < ?
+        GROUP BY idx`,
+      [startTime, bucketMs, new Date(startTime).toISOString(), new Date(endTime).toISOString()]
     );
     for (const r of rows) {
-      const t = new Date(r.timestamp).getTime();
-      if (t < startTime || t >= endTime) continue;
-      const idx = Math.floor((t - startTime) / bucketMs);
-      if (idx >= 0 && idx < bucketCount) {
-        buckets[idx].tokens += (r.promptTokens || 0) + (r.completionTokens || 0);
-        buckets[idx].cost += r.cost || 0;
-      }
+      const bucket = buckets[r.idx];
+      if (!bucket) continue;
+      bucket.tokens = r.tokens || 0;
+      bucket.cost = r.cost || 0;
     }
     return buckets;
   }
@@ -695,16 +783,22 @@ export async function getChartData(period = "7d") {
     const startTime = now - bucketCount * bucketMs;
     const buckets = Array.from({ length: bucketCount }, (_, i) => ({ label: labelFn(startTime + i * bucketMs), tokens: 0, cost: 0 }));
 
+    // MIN(expr, bucketCount - 1) mirrors the clamp the JS loop applied, so a row
+    // landing exactly on `now` stays in the last bucket instead of overflowing.
     const rows = db.all(
-      `SELECT timestamp, promptTokens, completionTokens, cost FROM usageHistory WHERE timestamp >= ?`,
-      [new Date(startTime).toISOString()]
+      `SELECT MIN(CAST((${EPOCH_MS_SQL} - ?) / ? AS INTEGER), ?) AS idx,
+              SUM(COALESCE(promptTokens, 0) + COALESCE(completionTokens, 0)) AS tokens,
+              SUM(COALESCE(cost, 0)) AS cost
+         FROM usageHistory
+        WHERE timestamp >= ? AND timestamp <= ?
+        GROUP BY idx`,
+      [startTime, bucketMs, bucketCount - 1, new Date(startTime).toISOString(), new Date(now).toISOString()]
     );
     for (const r of rows) {
-      const t = new Date(r.timestamp).getTime();
-      if (t < startTime || t > now) continue;
-      const idx = Math.min(Math.floor((t - startTime) / bucketMs), bucketCount - 1);
-      buckets[idx].tokens += (r.promptTokens || 0) + (r.completionTokens || 0);
-      buckets[idx].cost += r.cost || 0;
+      const bucket = buckets[r.idx];
+      if (!bucket) continue;
+      bucket.tokens = r.tokens || 0;
+      bucket.cost = r.cost || 0;
     }
     return buckets;
   }
