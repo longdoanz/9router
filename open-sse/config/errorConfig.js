@@ -28,11 +28,26 @@ export const DEFAULT_ERROR_MESSAGES = {
   504: "Gateway timeout"
 };
 
+// Parse a positive integer env override, falling back to a default.
+function envInt(name, def) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return def;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : def;
+}
+
 // Exponential backoff config for rate limits
 export const BACKOFF_CONFIG = {
   base: 2000,
   max: 5 * 60 * 1000,
-  maxLevel: 15
+  maxLevel: 15,
+  // Once the same account+model has failed this many times in a row on a
+  // backoff-type error (quota/rate-limit/capacity/overloaded), stop the gradual
+  // doubling and lock it out for a long fixed window instead — a provider that's
+  // still over its usage limit on attempt #3 isn't going to recover in the next
+  // few seconds, so there's no point hammering it while the doubling ramps up.
+  escalateAtLevel: envInt("QUOTA_ESCALATE_AT_LEVEL", 3),
+  escalatedCooldownMs: envInt("QUOTA_ESCALATED_COOLDOWN_MS", 20 * 60 * 1000)
 };
 
 // Default cooldown for transient/unknown errors

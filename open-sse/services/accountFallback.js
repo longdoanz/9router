@@ -7,6 +7,11 @@ import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS } from "../config/er
  * @returns {number} Cooldown in milliseconds
  */
 export function getQuotaCooldown(backoffLevel = 0) {
+  // 3rd+ consecutive failure on the same account+model: skip the doubling and
+  // lock it out for a long fixed window (see BACKOFF_CONFIG.escalateAtLevel).
+  if (backoffLevel >= BACKOFF_CONFIG.escalateAtLevel) {
+    return BACKOFF_CONFIG.escalatedCooldownMs;
+  }
   const level = Math.max(0, backoffLevel - 1);
   const cooldown = BACKOFF_CONFIG.base * Math.pow(2, level);
   return Math.min(cooldown, BACKOFF_CONFIG.max);
