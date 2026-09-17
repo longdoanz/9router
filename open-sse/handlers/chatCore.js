@@ -28,6 +28,7 @@ import { compressWithPxpipe } from "../rtk/pxpipe.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { stripUnsupportedModalities } from "../translator/concerns/modality.js";
 import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
+import { enforceContextWindow, isKnownContextWindow } from "../translator/concerns/contextWindow.js";
 import { defaultClaudeToolType, shouldDefaultClaudeToolType } from "../translator/concerns/toolCall.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 
@@ -352,6 +353,28 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (proxyOptions.connectionProxyEnabled && proxyOptions.connectionNoProxy) {
     const connectionName = credentials?.connectionName || credentials?.connectionId || "unknown";
     log?.debug?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${connectionName} | no_proxy=${proxyOptions.connectionNoProxy}`);
+  }
+
+  // Pre-flight context-window guard: clamp the completion ceiling (or reject
+  // when the prompt alone overflows) so an over-window request never reaches the
+  // upstream as a deterministic 400 that the fallback loop would retry forever.
+  // Only a real per-model window is actionable — for a model with no catalogued
+  // limit, getCapabilitiesForModel returns the generic DEFAULT floor, and acting
+  // on that would trim/reject requests for a model whose true window is larger.
+  // Those fall through to the upstream, whose overflow 400 the noFallback rule
+  // already keeps out of the lock/retry loop.
+  const contextWindow = getCapabilitiesForModel(provider, model).contextWindow;
+  if (isKnownContextWindow(contextWindow)) {
+    const ctxGuard = enforceContextWindow(translatedBody, contextWindow);
+    if (ctxGuard.action === "reject") {
+      trackPendingRequest(model, provider, connectionId, false, true);
+      appendRequestLog({ model, provider, connectionId, status: `FAILED ${HTTP_STATUS.BAD_REQUEST}` }).catch(() => { });
+      log?.warn?.("CTX", `${provider}/${model} rejected: ~${ctxGuard.estimatedPrompt} tok > window ${contextWindow}`);
+      return createErrorResult(HTTP_STATUS.BAD_REQUEST, ctxGuard.message);
+    }
+    if (ctxGuard.action === "clamped") {
+      log?.info?.("CTX", `${provider}/${model} max_tokens ${ctxGuard.requestedOutput} → ${ctxGuard.clampedTo} (prompt ~${ctxGuard.estimatedPrompt}, window ${contextWindow})`);
+    }
   }
 
   // Execute request

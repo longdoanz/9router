@@ -65,14 +65,21 @@ const COOLDOWN = {
 /**
  * Unified error classification rules.
  * Checked top-to-bottom: text rules first (by order), then status rules.
- * Each rule: { text?, status?, cooldownMs?, backoff? }
+ * Each rule: { text?, status?, cooldownMs?, backoff?, noFallback? }
  *   - text: substring match (case-insensitive) on error message
  *   - status: HTTP status code match
  *   - cooldownMs: fixed cooldown duration
  *   - backoff: true = use exponential backoff (rate limit)
+ *   - noFallback: true = deterministic, request-scoped error — do NOT lock the
+ *     account or retry. Sending the same payload to another account (or again to
+ *     the same one) reproduces the error verbatim, so a cooldown only steals a
+ *     healthy account from other requests and loops until the retry budget runs
+ *     out. Surfaced to the client as-is instead. (Context overflow is the
+ *     canonical case: prompt + completion exceeds the model's window.)
  */
 export const ERROR_RULES = [
   // --- Text-based rules (checked first, order = priority) ---
+  { text: "maximum context length",   noFallback: true },
   { text: "no credentials",           cooldownMs: COOLDOWN.long },
   { text: "request not allowed",      cooldownMs: COOLDOWN.short },
   { text: "improperly formed request", cooldownMs: COOLDOWN.long },
