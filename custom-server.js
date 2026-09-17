@@ -15,6 +15,50 @@ process.env.NINEROUTER_PEER_TOKEN = PEER_TOKEN;
 
 let backgroundRefreshStarted = false;
 
+// --- Graceful shutdown ------------------------------------------------------
+// Docker stops a container with SIGTERM, waits stop_grace_period, then SIGKILLs.
+// Without a drain here a redeploy kills in-flight SSE completions mid-stream:
+// nginx holds them open for proxy_read_timeout (600s), so every response still
+// generating is truncated. Close the listener (no new connections) and let the
+// active ones finish; force-exit only if they outlast the budget, so we never
+// hang past the SIGKILL and lose the log line explaining what happened.
+const SHUTDOWN_TIMEOUT_MS = Number(process.env.SHUTDOWN_TIMEOUT_MS) > 0
+  ? Number(process.env.SHUTDOWN_TIMEOUT_MS)
+  : 15000;
+
+const shutdownHooks = new Set();
+function onShutdown(fn) {
+  shutdownHooks.add(fn);
+}
+
+let shuttingDown = false;
+function shutdown(server, signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal} — draining, budget ${SHUTDOWN_TIMEOUT_MS}ms`);
+  for (const fn of shutdownHooks) {
+    try {
+      fn();
+    } catch {
+      /* a failing hook must not block the drain */
+    }
+  }
+
+  const forceExit = setTimeout(() => {
+    console.error(`[shutdown] drain exceeded ${SHUTDOWN_TIMEOUT_MS}ms — forcing exit`);
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  forceExit.unref();
+
+  server.close(() => {
+    clearTimeout(forceExit);
+    console.log("[shutdown] drained cleanly");
+    process.exit(0);
+  });
+  // Drop idle keep-alive sockets so close() can complete; active requests run on.
+  server.closeIdleConnections?.();
+}
+
 function startBackgroundTokenRefreshFromCustomServer() {
   if (backgroundRefreshStarted) return;
   backgroundRefreshStarted = true;
@@ -28,15 +72,13 @@ function startBackgroundTokenRefreshFromCustomServer() {
       } catch (e) {
         console.error("[BackgroundTokenRefresh] start failed:", e && e.message ? e.message : e);
       }
-      const stop = () => {
+      onShutdown(() => {
         try {
           m.stopBackgroundTokenRefresh();
         } catch {
           /* ignore */
         }
-      };
-      process.once("SIGINT", stop);
-      process.once("SIGTERM", stop);
+      });
     })
     .catch((e) => {
       // Expected in published CLI standalone (src/ not on disk). App bootstrap covers it.
@@ -76,6 +118,8 @@ http.createServer = (...args) => {
   server.once("listening", () => {
     startBackgroundTokenRefreshFromCustomServer();
   });
+  process.once("SIGTERM", () => shutdown(server, "SIGTERM"));
+  process.once("SIGINT", () => shutdown(server, "SIGINT"));
   const origEmit = server.emit;
   // JBR 25 sends h2c upgrades that the HTTP/1.1 server would otherwise close.
   server.emit = function (event, ...eventArgs) {
