@@ -5,22 +5,45 @@ import Modal from "./Modal";
 import Input from "./Input";
 import Button from "./Button";
 import ModelSelectModal from "./ModelSelectModal";
+import Badge from "./Badge";
+import { resolveProviderId } from "@/shared/constants/providers";
+import { parseAccountPin, withAccountPin } from "open-sse/utils/modelMarkers.js";
 
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
 
-// Inline editable model item
-function ModelItem({ index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown, onRemove }) {
+// Inline editable model item. A combo entry may pin a provider account with a
+// trailing `@connectionId` (see open-sse/utils/modelMarkers) — the picker below
+// edits that suffix and the model name is always shown pre-stripped.
+function ModelItem({ index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown, onRemove, activeProviders = [] }) {
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(model);
+  const [draft, setDraft] = useState(parseAccountPin(model).model);
+
+  const bare = parseAccountPin(model).model;
+  const pin = parseAccountPin(model).connectionId;
+  const prefix = (() => {
+    const i = typeof bare === "string" ? bare.indexOf("/") : -1;
+    return i > 0 ? bare.slice(0, i) : "";
+  })();
+  const resolvedId = prefix ? resolveProviderId(prefix) : "";
+  const connections = prefix
+    ? activeProviders.filter((c) => c.provider === prefix || c.provider === resolvedId || c.providerSpecificData?.prefix === prefix)
+    : [];
+  // Pinned account is gone — routing falls back by strategy, so warn rather than block.
+  const pinDangling = !!pin && !activeProviders.some((c) => c.id === pin);
+
   const commit = () => {
     const trimmed = draft.trim();
-    if (trimmed && trimmed !== model) onEdit(trimmed);
-    else setDraft(model);
+    if (!trimmed) { setDraft(bare); setEditing(false); return; }
+    // Keep the pin only if the provider prefix is unchanged.
+    const nextPrefix = trimmed.indexOf("/") > 0 ? trimmed.slice(0, trimmed.indexOf("/")) : "";
+    const next = withAccountPin(trimmed, nextPrefix === prefix ? pin : null);
+    if (next !== model) onEdit(next);
+    else setDraft(bare);
     setEditing(false);
   };
   const handleKeyDown = (e) => {
     if (e.key === "Enter") commit();
-    if (e.key === "Escape") { setDraft(model); setEditing(false); }
+    if (e.key === "Escape") { setDraft(bare); setEditing(false); }
   };
   return (
     <div className="group flex min-w-0 items-center gap-1.5 rounded-md bg-black/[0.02] px-2 py-1 transition-colors hover:bg-black/[0.04] dark:bg-white/[0.02] dark:hover:bg-white/[0.04]">
@@ -30,7 +53,31 @@ function ModelItem({ index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown
           className="min-w-0 flex-1 rounded border border-primary/40 bg-white px-1.5 py-0.5 font-mono text-xs text-text-main outline-none dark:bg-black/20" />
       ) : (
         <div className="min-w-0 flex-1 cursor-text truncate rounded px-1.5 py-0.5 font-mono text-xs text-text-main hover:bg-black/5 dark:hover:bg-white/5"
-          onClick={() => setEditing(true)} title="Click to edit">{model}</div>
+          onClick={() => { setDraft(bare); setEditing(true); }} title="Click to edit">{bare}</div>
+      )}
+      {connections.length > 0 && (
+        <select
+          value={pin && !pinDangling ? pin : ""}
+          onChange={(e) => onEdit(withAccountPin(model, e.target.value || null))}
+          title={pinDangling ? "Pinned account no longer available — falling back by strategy" : "Route this model to a specific account"}
+          className={`max-w-[150px] shrink-0 truncate rounded border bg-transparent px-1 py-0.5 font-mono text-[11px] outline-none cursor-pointer ${
+            pinDangling
+              ? "border-yellow-500/50 text-yellow-600 dark:text-yellow-400"
+              : pin
+                ? "border-primary/40 text-primary"
+                : "border-black/10 text-text-muted dark:border-white/15"
+          }`}
+        >
+          <option value="">Auto</option>
+          {connections.map((c) => (
+            <option key={c.id} value={c.id}>
+              {(c.name || c.email || c.displayName || c.id.slice(0, 8))}{c.priority != null ? ` #${c.priority}` : ""}
+            </option>
+          ))}
+        </select>
+      )}
+      {pinDangling && (
+        <Badge variant="warning" size="sm" icon="warning" className="shrink-0">account removed</Badge>
       )}
       <div className="flex shrink-0 items-center gap-0.5">
         <button onClick={onMoveUp} disabled={isFirst}
@@ -146,7 +193,8 @@ export default function ComboFormModal({ isOpen, combo, onClose, onSave, activeP
                     onEdit={(v) => { const a = [...models]; a[index] = v; setModels(a); }}
                     onMoveUp={() => handleMoveUp(index)}
                     onMoveDown={() => handleMoveDown(index)}
-                    onRemove={() => handleRemoveModel(index)} />
+                    onRemove={() => handleRemoveModel(index)}
+                    activeProviders={activeProviders} />
                 ))}
               </div>
             )}

@@ -1,6 +1,7 @@
 // Re-export from open-sse with localDb integration
 import { getModelAliases, getComboByName, getProviderNodes } from "@/lib/localDb";
 import { parseModel as parseModelCore, resolveModelAliasFromMap, getModelInfoCore } from "open-sse/services/model.js";
+import { parseAccountPin } from "open-sse/utils/modelMarkers.js";
 import REGISTRY from "open-sse/providers/registry/index.js";
 
 // Local provider alias overrides (HMR-friendly, applied on top of open-sse map)
@@ -33,9 +34,20 @@ export async function resolveModelAlias(alias) {
 }
 
 /**
- * Get full model info (parse or resolve)
+ * Get full model info (parse or resolve).
+ *
+ * A combo entry may carry an account pin (`provider/model@connectionId`). The pin
+ * is stripped here — the single choke point every modality handler resolves
+ * through — and returned alongside the resolved model so callers can forward it
+ * to getProviderCredentials as `preferredConnectionId`.
  */
 export async function getModelInfo(modelStr) {
+  const { model: bareModel, connectionId } = parseAccountPin(modelStr);
+  const { provider, model } = await getModelInfoInner(bareModel);
+  return { provider, model, connectionId };
+}
+
+async function getModelInfoInner(modelStr) {
   const parsed = parseModel(modelStr);
 
   if (!parsed.isAlias) {
@@ -86,7 +98,9 @@ export async function getComboModels(modelStr) {
   // Only check if it's not in provider/model format
   if (modelStr.includes("/")) return null;
 
-  const combo = await getComboByName(modelStr);
+  // Entries keep their account pins — only the lookup name is unpinned.
+  const { model: name } = parseAccountPin(modelStr);
+  const combo = await getComboByName(name);
   if (combo && combo.models && combo.models.length > 0) {
     return combo.models;
   }

@@ -5,13 +5,31 @@ import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, us
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { restrictToVerticalAxis, restrictToParentElement } from "@dnd-kit/modifiers";
-import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, ConfirmModal, CapacityBadges, Select, Toggle } from "@/shared/components";
+import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, ConfirmModal, CapacityBadges, Select, Toggle, Badge } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
-import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
+import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, resolveProviderId } from "@/shared/constants/providers";
+import { parseAccountPin, withAccountPin } from "open-sse/utils/modelMarkers.js";
 
 // Validate combo name: only a-z, A-Z, 0-9, -, _
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
+
+// A combo entry can pin a provider ACCOUNT by appending its connection id:
+// "cc/claude-opus-4-5@3f2a9c1e-..." routes that entry to that connection only.
+// Storage stays a plain string (open-sse parses the suffix), so these are thin
+// wrappers over the same helpers the routing engine uses.
+const modelOf = (entry) => parseAccountPin(entry).model;
+
+const pinOf = (entry) => parseAccountPin(entry).connectionId;
+
+// "cc/claude-opus-4-5@uuid" → "cc" — the provider prefix before the first "/".
+function providerOf(entry) {
+  const m = modelOf(entry);
+  const i = typeof m === "string" ? m.indexOf("/") : -1;
+  return i > 0 ? m.slice(0, i) : "";
+}
+
+const setPin = (entry, connectionId) => withAccountPin(entry, connectionId);
 
 // Capacity adapter: global fallback pools of models per input-modality capability.
 // A request needing a capability the target model/combo lacks switches straight
@@ -313,10 +331,13 @@ function ComboCard({ combo, getCaps, activeProviders = [], copied, onCopy, onEdi
               {combo.models.length === 0 ? (
                 <span className="text-xs text-text-muted italic">No models</span>
               ) : (
-                combo.models.slice(0, 3).map((model, index) => (
+                combo.models.slice(0, 3).map((entry, index) => (
                   <code key={index} className="inline-flex items-center gap-1 rounded bg-black/5 px-1.5 py-0.5 font-mono text-xs text-text-muted dark:bg-white/5">
-                    <span>{model}</span>
-                    <CapacityBadges caps={getCaps?.(model)} />
+                    <span>{modelOf(entry)}</span>
+                    {pinOf(entry) && (
+                      <span className="text-primary" title="Pinned to a specific account">@acc</span>
+                    )}
+                    <CapacityBadges caps={getCaps?.(entry)} />
                   </code>
                 ))
               )}
@@ -334,7 +355,7 @@ function ComboCard({ combo, getCaps, activeProviders = [], copied, onCopy, onEdi
                   title="Pick the model that fuses panel answers"
                 >
                   <span className="material-symbols-outlined text-[13px]">gavel</span>
-                  <span className="truncate">{judge || `Auto — ${combo.models[0] || "first model"}`}</span>
+                  <span className="truncate">{judge ? modelOf(judge) : `Auto — ${combo.models[0] ? modelOf(combo.models[0]) : "first model"}`}</span>
                 </button>
                 {judge && (
                   <button
@@ -486,13 +507,13 @@ function CapacityAdapterCap({ cap, entry, onChange, activeProviders, getCaps }) 
               {models.length === 0 ? (
                 <span className="text-xs text-text-muted italic">No models</span>
               ) : (
-                models.slice(0, 3).map((model, index) => (
+                models.slice(0, 3).map((entry, index) => (
                   <code
-                    key={`${model}-${index}`}
+                    key={`${entry}-${index}`}
                     className="group/chip inline-flex items-center gap-1 rounded bg-black/5 px-1.5 py-0.5 font-mono text-xs text-text-muted dark:bg-white/5"
                   >
-                    <span>{model}</span>
-                    <CapacityBadges caps={getCaps?.(model)} />
+                    <span>{modelOf(entry)}</span>
+                    <CapacityBadges caps={getCaps?.(entry)} />
                     <button onClick={() => handleMove(index, -1)} disabled={index === 0} className={`leading-none opacity-0 group-hover/chip:opacity-100 ${index === 0 ? "text-text-muted/20" : "text-text-muted hover:text-primary"}`}>
                       <span className="material-symbols-outlined text-[12px]">arrow_upward</span>
                     </button>
@@ -552,7 +573,23 @@ function CapacityAdapterCap({ cap, entry, onChange, activeProviders, getCaps }) 
   );
 }
 
-function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown, onRemove }) {
+// Accounts (connections) usable by a combo entry, matched on the entry's provider
+// prefix. Built-in providers resolve alias → id; user-defined provider-nodes carry
+// their own prefix in providerSpecificData (same match as /api/v1/models).
+function connectionsForPrefix(activeProviders, prefix) {
+  if (!prefix) return [];
+  const resolvedId = resolveProviderId(prefix);
+  return activeProviders.filter((c) =>
+    c.provider === prefix || c.provider === resolvedId || c.providerSpecificData?.prefix === prefix
+  );
+}
+
+function connectionLabel(c) {
+  const name = c.name || c.email || c.displayName || c.id.slice(0, 8);
+  return c.priority != null ? `${name} #${c.priority}` : name;
+}
+
+function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown, onRemove, activeProviders = [] }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useSortable({ id });
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -561,17 +598,29 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
     zIndex: isDragging ? 999 : undefined,
   };
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(model);
+  const [draft, setDraft] = useState(modelOf(model));
+
+  const pin = pinOf(model);
+  const bare = modelOf(model);
+  const connections = connectionsForPrefix(activeProviders, providerOf(model));
+  // Account was deleted or disabled since the pin was saved. Routing falls through
+  // to the strategy on its own, so this is a warning, not an error.
+  const pinDangling = !!pin && !activeProviders.some((c) => c.id === pin);
+
   const commit = () => {
     const trimmed = draft.trim();
-    if (trimmed && trimmed !== model) onEdit(trimmed);
-    else setDraft(model);
+    if (!trimmed) { setDraft(bare); setEditing(false); return; }
+    // Pin only survives an edit that keeps the same provider — otherwise it would
+    // point at an account the new provider has nothing to do with.
+    const next = setPin(trimmed, providerOf(trimmed) === providerOf(model) ? pin : null);
+    if (next !== model) onEdit(next);
+    else setDraft(bare);
     setEditing(false);
   };
 
   const handleKeyDown = (e) => {
     if (e.key === "Enter") commit();
-    if (e.key === "Escape") { setDraft(model); setEditing(false); }
+    if (e.key === "Escape") { setDraft(bare); setEditing(false); }
   };
 
   return (
@@ -611,11 +660,40 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
       ) : (
         <div
           className="min-w-0 flex-1 cursor-text truncate rounded px-1.5 py-0.5 font-mono text-xs text-text-main hover:bg-black/5 dark:hover:bg-white/5"
-          onClick={() => setEditing(true)}
+          onClick={() => { setDraft(bare); setEditing(true); }}
           title="Click to edit"
         >
-          {model}
+          {bare}
         </div>
+      )}
+
+      {/* Account pin: leave on Auto to keep the provider's own account strategy */}
+      {connections.length > 0 && (
+        <select
+          value={pin && !pinDangling ? pin : ""}
+          onChange={(e) => onEdit(setPin(model, e.target.value || null))}
+          onClick={(e) => e.stopPropagation()}
+          title={pinDangling ? "Pinned account no longer available — falling back by strategy" : "Route this model to a specific account"}
+          className={`max-w-[150px] shrink-0 truncate rounded border bg-transparent px-1 py-0.5 font-mono text-[11px] outline-none cursor-pointer ${
+            pinDangling
+              ? "border-yellow-500/50 text-yellow-600 dark:text-yellow-400"
+              : pin
+                ? "border-primary/40 text-primary"
+                : "border-black/10 text-text-muted dark:border-white/15"
+          }`}
+        >
+          <option value="">Auto</option>
+          {connections.map((c) => (
+            <option key={c.id} value={c.id}>{connectionLabel(c)}</option>
+          ))}
+        </select>
+      )}
+
+      {/* Pinned account is gone: surface it, since the combo silently falls back */}
+      {pinDangling && (
+        <Badge variant="warning" size="sm" icon="warning" className="shrink-0">
+          account removed
+        </Badge>
       )}
 
       {/* Priority arrows */}
@@ -801,6 +879,7 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
                       onMoveUp={() => handleMoveUp(index)}
                       onMoveDown={() => handleMoveDown(index)}
                       onRemove={() => handleRemoveModel(index)}
+                      activeProviders={activeProviders}
                     />
                   ))}
                 </div>

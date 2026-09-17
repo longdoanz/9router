@@ -237,7 +237,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   const conversationId = resolveClientConversationId(clientRawRequest?.headers, body, provider);
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, { conversationId });
+    // A combo entry may pin an account (`provider/model@connectionId`). The pin is
+    // advisory: if that account is excluded (failed earlier in this loop) or gone,
+    // selection falls through to the configured strategy — account fallback intact.
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, {
+      conversationId,
+      preferredConnectionId: modelInfo.connectionId
+    });
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {

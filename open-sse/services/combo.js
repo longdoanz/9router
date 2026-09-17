@@ -6,6 +6,7 @@ import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
 import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
+import { parseAccountPin } from "../utils/modelMarkers.js";
 
 // Hard capabilities = input modalities; missing one drops request data (e.g. image
 // stripped). Must be prioritized. Soft (e.g. search) only degrades a feature.
@@ -66,9 +67,11 @@ export function reorderByCapabilities(models, required) {
   const soft = [...required].filter((c) => !HARD_CAPS.has(c));
 
   const tierOf = (m) => {
-    const slash = typeof m === "string" ? m.indexOf("/") : -1;
-    const provider = slash > 0 ? m.slice(0, slash) : "";
-    const model = slash > 0 ? m.slice(slash + 1) : m;
+    // Strip any account pin so the capability lookup sees the real model id.
+    const bare = typeof m === "string" ? parseAccountPin(m).model : m;
+    const slash = typeof bare === "string" ? bare.indexOf("/") : -1;
+    const provider = slash > 0 ? bare.slice(0, slash) : "";
+    const model = slash > 0 ? bare.slice(slash + 1) : bare;
     const caps = getCapabilitiesForModel(provider, model);
     if (!hard.every((c) => caps[c] === true)) return 2;
     return soft.every((c) => caps[c] === true) ? 0 : 1;

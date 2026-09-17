@@ -38,8 +38,10 @@ function loadModelCaps() {
 }
 
 // Resolve caps from a "provider/model" string or a bare model id.
+// A trailing `@connectionId` account pin (combo entries) is not part of the id.
 function resolveCaps(byFull, byId, key) {
   if (!key) return null;
+  if (typeof key === "string") key = key.replace(/@[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "");
   if (byFull[key]) return byFull[key];
   const bare = key.includes("/") ? key.slice(key.indexOf("/") + 1) : key;
   if (byId[bare]) return byId[bare];

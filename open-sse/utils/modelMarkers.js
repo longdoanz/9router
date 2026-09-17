@@ -18,3 +18,27 @@ export function stripModelContextMarker(modelStr) {
   if (!match) return { model: modelStr, contextMarker: null };
   return { model: trimmed.slice(0, -match[0].length), contextMarker: match[0].slice(1, -1).toLowerCase() };
 }
+
+// A combo entry can pin its provider ACCOUNT by appending the connection id:
+//   "cc/claude-opus-4-5@3f2a9c1e-...."  → route this entry to that connection
+// Like the context marker above, the pin is an annotation on the model string, not
+// part of any model id — it is stripped at model resolution so it never reaches an
+// upstream. The pin travels on the combo entry itself, which keeps handleComboChat's
+// `handleSingleModel(body, modelStr)` contract unchanged. `@` appears in no model id.
+const ACCOUNT_PIN = /@([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+// Returns { model, connectionId } — connectionId is null when there is no pin.
+// Only a trailing UUID is treated as a pin, so an unrelated "@" in a model id
+// (there are none today) falls through untouched.
+export function parseAccountPin(modelStr) {
+  if (typeof modelStr !== "string") return { model: modelStr, connectionId: null };
+  const match = modelStr.match(ACCOUNT_PIN);
+  if (!match) return { model: modelStr, connectionId: null };
+  return { model: modelStr.slice(0, -match[0].length), connectionId: match[1] };
+}
+
+// Append a pin to a model string; a null/empty connectionId clears any existing pin.
+export function withAccountPin(model, connectionId) {
+  const { model: bare } = parseAccountPin(model);
+  return connectionId ? `${bare}@${connectionId}` : bare;
+}

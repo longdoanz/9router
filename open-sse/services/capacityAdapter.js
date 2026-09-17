@@ -9,6 +9,7 @@
  * never overrides a combo that already has a member covering the capability.
  */
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
+import { parseAccountPin } from "../utils/modelMarkers.js";
 
 const CAPABILITY_KEYS = ["vision", "pdf", "audioInput", "videoInput"];
 const HARD_CAPS = new Set(CAPABILITY_KEYS);
@@ -76,6 +77,8 @@ export function getActiveAdapterStrategy(requiredCapabilities, settings) {
 }
 
 function modelSatisfies(modelStr, requiredHard) {
+  // Strip any account pin — it is not part of the model id the catalog knows.
+  modelStr = parseAccountPin(modelStr).model;
   const slash = modelStr.indexOf("/");
   const provider = slash > 0 ? modelStr.slice(0, slash) : "";
   const model = slash > 0 ? modelStr.slice(slash + 1) : modelStr;
@@ -161,10 +164,12 @@ export function withCapacityAdapterStripping(handleSingleModel, adapterModels) {
   const adapterSet = new Set(adapterModels);
   if (adapterSet.size === 0) return handleSingleModel;
   return (body, modelStr, ...rest) => {
-    if (adapterSet.has(modelStr)) {
-      const slash = modelStr.indexOf("/");
-      const provider = slash > 0 ? modelStr.slice(0, slash) : "";
-      const model = slash > 0 ? modelStr.slice(slash + 1) : modelStr;
+    // Match on the bare model, but forward modelStr untouched so an account pin survives.
+    const bare = parseAccountPin(modelStr).model;
+    if (adapterSet.has(bare)) {
+      const slash = bare.indexOf("/");
+      const provider = slash > 0 ? bare.slice(0, slash) : "";
+      const model = slash > 0 ? bare.slice(slash + 1) : bare;
       const { contextWindow } = getCapabilitiesForModel(provider, model);
       body = stripHistoryForContext(body, contextWindow);
     }

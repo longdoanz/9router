@@ -55,6 +55,7 @@ describe("model routing", () => {
       .resolves.toEqual({
         provider: "cloudflare-ai",
         model: "@cf/black-forest-labs/flux-2-klein-9b",
+        connectionId: null,
       });
   });
 
@@ -75,6 +76,7 @@ describe("model routing", () => {
       .resolves.toEqual({
         provider: "openai-compatible-chat-test",
         model: "gpt-image-1",
+        connectionId: null,
       });
   });
 });
