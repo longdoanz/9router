@@ -22,6 +22,11 @@ let backgroundRefreshStarted = false;
 // generating is truncated. Close the listener (no new connections) and let the
 // active ones finish; force-exit only if they outlast the budget, so we never
 // hang past the SIGKILL and lose the log line explaining what happened.
+//
+// NEXT_MANUAL_SIG_HANDLE stops Next's own start-server from registering
+// SIGTERM→exit(143) (it races ours and would skip the drain). Set before
+// requiring the standalone server.
+process.env.NEXT_MANUAL_SIG_HANDLE = "true";
 const SHUTDOWN_TIMEOUT_MS = Number(process.env.SHUTDOWN_TIMEOUT_MS) > 0
   ? Number(process.env.SHUTDOWN_TIMEOUT_MS)
   : 15000;
@@ -44,16 +49,19 @@ function shutdown(server, signal) {
     }
   }
 
+  // Unref'd: must not hold the loop open, or the DB's beforeExit (WAL flush)
+  // could never fire. It still fires if sockets keep the loop alive past budget.
   const forceExit = setTimeout(() => {
-    console.error(`[shutdown] drain exceeded ${SHUTDOWN_TIMEOUT_MS}ms — forcing exit`);
+    fs.writeSync(2, `[shutdown] drain exceeded ${SHUTDOWN_TIMEOUT_MS}ms — forcing exit\n`);
     process.exit(1);
   }, SHUTDOWN_TIMEOUT_MS);
   forceExit.unref();
 
   server.close(() => {
     clearTimeout(forceExit);
-    console.log("[shutdown] drained cleanly");
-    process.exit(0);
+    fs.writeSync(2, "[shutdown] drained cleanly\n");
+    // Deliberately no process.exit here: let the loop drain so the DB adapter's
+    // beforeExit flushes the WAL, then the process exits 0 on its own.
   });
   // Drop idle keep-alive sockets so close() can complete; active requests run on.
   server.closeIdleConnections?.();

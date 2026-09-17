@@ -32,11 +32,12 @@ export function createBetterSqliteAdapter(filePath) {
     try { db.close(); } catch {}
   }
 
-  // Ensure WAL is flushed and -wal/-shm files removed on shutdown
+  // Ensure WAL is flushed and -wal/-shm files removed on shutdown. Only on
+  // beforeExit (loop drained) — a signal handler here would process.exit before
+  // the server finished draining, closing the DB under in-flight requests and
+  // stranding them mid-stream. Lifecycle belongs to custom-server.js.
   const onShutdown = () => gracefulClose();
   process.once("beforeExit", onShutdown);
-  process.once("SIGINT", () => { onShutdown(); process.exit(0); });
-  process.once("SIGTERM", () => { onShutdown(); process.exit(0); });
 
   return {
     driver: "better-sqlite3",

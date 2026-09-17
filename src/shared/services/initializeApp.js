@@ -75,7 +75,9 @@ export async function initializeApp() {
         try { removeAllDNSEntriesSync(); } catch { /* best effort */ }
         try { killAllBridges(); } catch { /* best effort */ }
         killCloudflared();
-        process.exit();
+        // No process.exit() here: custom-server.js owns lifecycle and drains the
+        // HTTP server on SIGTERM. Exiting synchronously cuts in-flight SSE
+        // completions mid-stream. DNS cleanup also runs on the "exit" event below.
       };
       process.on("SIGINT", cleanup);
       process.on("SIGTERM", cleanup);

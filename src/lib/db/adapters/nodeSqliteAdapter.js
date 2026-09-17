@@ -43,10 +43,11 @@ export async function createNodeSqliteAdapter(filePath) {
     try { stmtCache.clear(); } catch {}
     try { db.close(); } catch {}
   }
+  // Flush WAL on beforeExit only. A signal handler here would exit before the
+  // server drains, closing the DB under in-flight requests — lifecycle belongs
+  // to custom-server.js.
   const onShutdown = () => gracefulClose();
   process.once("beforeExit", onShutdown);
-  process.once("SIGINT", () => { onShutdown(); process.exit(0); });
-  process.once("SIGTERM", () => { onShutdown(); process.exit(0); });
 
   return {
     driver: "node:sqlite",
