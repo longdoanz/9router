@@ -304,7 +304,12 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   log.warn("AUTH", `${connName} locked ${lockKey} for ${Math.round(cooldownMs / 1000)}s [${status}]`);
 
   if (provider && status && reason) {
-    console.error(`❌ ${provider} [${status}]: ${reason}`);
+    // Console gets the untruncated text: this line is forwarded verbatim to the
+    // Telegram alert channel, where a 100-char cut hides the actual cause
+    // (opt-in URL, offending field name, upstream body). `lastError` above stays
+    // truncated — it is shown in the dashboard's narrow connection row.
+    const detail = typeof errorText === "string" ? errorText : "Provider error";
+    console.error(`❌ ${provider} [${status}] (${connName}): ${detail}`);
   }
 
   return { shouldFallback: true, cooldownMs };
