@@ -104,8 +104,17 @@ describe("checkFallbackError — context overflow does not lock/retry", () => {
     expect(checkFallbackError(400, "MAXIMUM CONTEXT LENGTH exceeded").shouldFallback).toBe(false);
   });
 
-  it("still falls back on unrelated 400s (unchanged transient default)", () => {
+  it("does not fall back on an unrelated 400 either (request-scoped, not account-scoped)", () => {
+    // Upstream v0.5.81 generalised this: any unmatched 4xx is caused by the
+    // request itself, so cooling an account down only steals a healthy
+    // connection. Account-scoped statuses keep their rules (401/402/403/404/429).
     const res = checkFallbackError(400, "some malformed field");
+    expect(res.shouldFallback).toBe(false);
+    expect(res.cooldownMs).toBe(0);
+  });
+
+  it("still falls back with a transient cooldown on unmatched server errors", () => {
+    const res = checkFallbackError(503, "upstream exploded");
     expect(res.shouldFallback).toBe(true);
     expect(res.cooldownMs).toBe(30000);
   });
