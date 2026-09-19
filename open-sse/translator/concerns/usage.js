@@ -57,7 +57,16 @@ const USAGE_EXTRACTORS = {
   commandcode(raw) {
     const input = n(raw.inputTokens), output = n(raw.outputTokens);
     const total = typeof raw.totalTokens === "number" ? raw.totalTokens : input + output;
-    return { promptTokens: input, completionTokens: output, totalTokens: total };
+    // AI SDK v5 usage carries cachedInputTokens as a SUBSET of inputTokens (not
+    // additive, unlike Claude's cache_read/cache_creation which sit outside
+    // input_tokens) — reporting it here doesn't change promptTokens/totalTokens
+    // math, only surfaces the cache-hit count that was previously always dropped.
+    // Accept snake_case variants too in case the upstream shape differs from the
+    // AI SDK v5 default.
+    const cached = n(raw.cachedInputTokens) || n(raw.cache_read_input_tokens) || n(raw.cachedTokens) || n(raw.cached_tokens);
+    const out = { promptTokens: input, completionTokens: output, totalTokens: total };
+    if (cached > 0) out.cachedTokens = cached;
+    return out;
   },
 };
 
