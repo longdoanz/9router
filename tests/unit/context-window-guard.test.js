@@ -87,6 +87,77 @@ describe("enforceContextWindow", () => {
     }
     expect(body.max_tokens).toBe(5000);
   });
+
+  it("leaves headroom below the raw window instead of targeting it exactly (estimator safety margin)", () => {
+    // prompt ~950 tok sits between 90% (900) and 100% (1000) of a 1000-token
+    // window: the raw check alone would call this "ok", but the margined one
+    // must still treat it as over so the estimator's own error has room.
+    const body = bodyWithPromptTokens(950, 10);
+    const res = enforceContextWindow(body, 1000);
+    expect(res.action).not.toBe("ok");
+  });
+
+  it("drops the oldest turn (user question + assistant reply) when an older turn can be shed", () => {
+    const body = {
+      messages: [
+        { role: "user", content: "x".repeat(3000) },       // old turn, ~750 tok
+        { role: "assistant", content: "y".repeat(400) },   // reply to the old turn — dropped with it
+        { role: "user", content: "z".repeat(400) },         // recent turn, ~100 tok
+      ],
+    };
+    // prompt ~850 tok > window 500 while the old turn is in; without it, ~100 < 500.
+    const res = enforceContextWindow(body, 500);
+    expect(res.action).toBe("trimmed");
+    expect(res.turnsDropped).toBe(1);
+    expect(res.estimatedPrompt).toBeLessThan(500);
+    expect(body.messages).toEqual([{ role: "user", content: "z".repeat(400) }]);
+  });
+
+  it("keeps a leading system message out of the droppable turns", () => {
+    const body = {
+      messages: [
+        { role: "system", content: "s".repeat(200) },
+        { role: "user", content: "x".repeat(3000) },
+        { role: "user", content: "z".repeat(400) },
+      ],
+    };
+    const res = enforceContextWindow(body, 500);
+    expect(res.action).toBe("trimmed");
+    expect(body.messages[0]).toEqual({ role: "system", content: "s".repeat(200) });
+    expect(body.messages.at(-1)).toEqual({ role: "user", content: "z".repeat(400) });
+  });
+
+  it("keeps a tool_result-only user message glued to the assistant turn that requested it", () => {
+    const body = {
+      messages: [
+        { role: "user", content: "x".repeat(3000) },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "f", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+        { role: "user", content: "z".repeat(400) },
+      ],
+    };
+    const res = enforceContextWindow(body, 500);
+    expect(res.action).toBe("trimmed");
+    expect(res.turnsDropped).toBe(1);
+    // The tool_use/tool_result pair must survive or leave together — never split.
+    const hasToolUse = body.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === "tool_use"));
+    const hasToolResult = body.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === "tool_result"));
+    expect(hasToolUse).toBe(hasToolResult);
+  });
+
+  it("still rejects when only one turn is left and it alone overflows", () => {
+    const body = { messages: [{ role: "user", content: "x".repeat(20000) }] };
+    const res = enforceContextWindow(body, 1000);
+    expect(res.action).toBe("reject");
+    expect(res.turnsDropped).toBe(0);
+  });
+
+  it("does not attempt to trim a non-messages-array wire shape (e.g. Gemini contents)", () => {
+    const body = { contents: [{ role: "user", parts: [{ text: "x".repeat(20000) }] }] };
+    const res = enforceContextWindow(body, 1000);
+    expect(res.action).toBe("reject");
+    expect(res.turnsDropped).toBe(0);
+  });
 });
 
 describe("checkFallbackError — context overflow does not lock/retry", () => {

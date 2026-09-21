@@ -355,8 +355,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     log?.debug?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${connectionName} | no_proxy=${proxyOptions.connectionNoProxy}`);
   }
 
-  // Pre-flight context-window guard: clamp the completion ceiling (or reject
-  // when the prompt alone overflows) so an over-window request never reaches the
+  // Pre-flight context-window guard: clamp the completion ceiling, or drop the
+  // oldest conversation turns (or reject if nothing more can be dropped) when
+  // the prompt alone overflows, so an over-window request never reaches the
   // upstream as a deterministic 400 that the fallback loop would retry forever.
   // Only a real per-model window is actionable — for a model with no catalogued
   // limit, getCapabilitiesForModel returns the generic DEFAULT floor, and acting
@@ -369,8 +370,16 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     if (ctxGuard.action === "reject") {
       trackPendingRequest(model, provider, connectionId, false, true);
       appendRequestLog({ model, provider, connectionId, status: `FAILED ${HTTP_STATUS.BAD_REQUEST}` }).catch(() => { });
-      log?.warn?.("CTX", `${provider}/${model} rejected: ~${ctxGuard.estimatedPrompt} tok > window ${contextWindow}`);
+      const trimNote = ctxGuard.turnsDropped ? ` (already dropped ${ctxGuard.turnsDropped} oldest turn(s), still over)` : "";
+      log?.warn?.("CTX", `${provider}/${model} rejected: ~${ctxGuard.estimatedPrompt} tok > window ${contextWindow}${trimNote}`);
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, ctxGuard.message);
+    }
+    if (ctxGuard.turnsDropped > 0) {
+      // Client's own idea of the model's window didn't match reality (see
+      // contextWindow.js) — the request still went out, but on a trimmed
+      // conversation, so this must stay visible instead of silently eating
+      // the client's history.
+      log?.warn?.("CTX", `${provider}/${model} dropped ${ctxGuard.turnsDropped} oldest turn(s) to fit window (prompt now ~${ctxGuard.estimatedPrompt}, window ${contextWindow})`);
     }
     if (ctxGuard.action === "clamped") {
       log?.info?.("CTX", `${provider}/${model} max_tokens ${ctxGuard.requestedOutput} → ${ctxGuard.clampedTo} (prompt ~${ctxGuard.estimatedPrompt}, window ${contextWindow})`);
