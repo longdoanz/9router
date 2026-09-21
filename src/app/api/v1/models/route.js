@@ -5,7 +5,8 @@ import {
   isAnthropicCompatibleProvider,
   isOpenAICompatibleProvider,
 } from "@/shared/constants/providers";
-import { getProviderConnections, getCombos, getCustomModels, getModelAliases } from "@/lib/localDb";
+import { getProviderConnections, getCombos, getCustomModels, getModelAliases, getSettings } from "@/lib/localDb";
+import { extractApiKey, isValidApiKey } from "@/sse/services/auth";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
@@ -570,6 +571,17 @@ export async function OPTIONS() {
  */
 export async function GET(request) {
   try {
+    const settings = await getSettings();
+    if (settings.requireApiKey) {
+      const apiKey = extractApiKey(request);
+      if (!apiKey || !(await isValidApiKey(apiKey))) {
+        return Response.json(
+          { error: { message: apiKey ? "Invalid API key" : "Missing API key", type: "authentication_error" } },
+          { status: 401, headers: { "Access-Control-Allow-Origin": "*" } },
+        );
+      }
+    }
+
     // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
     const data = await buildModelsList([LLM_KIND], { skipDynamicFetch });

@@ -1,4 +1,6 @@
 import { buildModelsList } from "../route.js";
+import { getSettings } from "@/lib/localDb";
+import { extractApiKey, isValidApiKey } from "@/sse/services/auth";
 
 // URL slug → service kind(s). `web` covers both webSearch and webFetch.
 const KIND_SLUG_MAP = {
@@ -37,8 +39,19 @@ function json(data, options = {}) {
  * GET /v1/models/{provider}/{model} - OpenAI-compatible single model lookup.
  * Supported kinds: image, tts, stt, embedding, image-to-text, web.
  */
-export async function GET(_request, { params }) {
+export async function GET(request, { params }) {
   try {
+    const settings = await getSettings();
+    if (settings.requireApiKey) {
+      const apiKey = extractApiKey(request);
+      if (!apiKey || !(await isValidApiKey(apiKey))) {
+        return json(
+          { error: { message: apiKey ? "Invalid API key" : "Missing API key", type: "authentication_error" } },
+          { status: 401 },
+        );
+      }
+    }
+
     const { model } = await params;
     const path = Array.isArray(model) ? model : [model];
     const identifier = path.filter(Boolean).join("/");
