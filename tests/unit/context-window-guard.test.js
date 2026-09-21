@@ -14,7 +14,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import { enforceContextWindow, estimateBodyTokens, isKnownContextWindow } from "../../open-sse/translator/concerns/contextWindow.js";
+import { enforceContextWindow, estimateBodyTokens, isKnownContextWindow, planHistoryTrim } from "../../open-sse/translator/concerns/contextWindow.js";
+import { stripHistoryForContext } from "../../open-sse/services/capacityAdapter.js";
 import { checkFallbackError } from "../../open-sse/services/accountFallback.js";
 import { DEFAULT_CAPABILITIES } from "../../open-sse/providers/capabilities.js";
 
@@ -152,11 +153,132 @@ describe("enforceContextWindow", () => {
     expect(res.turnsDropped).toBe(0);
   });
 
-  it("does not attempt to trim a non-messages-array wire shape (e.g. Gemini contents)", () => {
+  it("rejects a single oversized turn in a Gemini contents body (nothing to drop)", () => {
     const body = { contents: [{ role: "user", parts: [{ text: "x".repeat(20000) }] }] };
     const res = enforceContextWindow(body, 1000);
     expect(res.action).toBe("reject");
     expect(res.turnsDropped).toBe(0);
+  });
+
+  it("trims a Gemini contents body, keeping system parts and the current turn", () => {
+    const body = {
+      systemInstruction: { parts: [{ text: "sys" }] },
+      contents: [
+        { role: "user", parts: [{ text: "x".repeat(3000) }] },
+        { role: "model", parts: [{ text: "y".repeat(400) }] },
+        { role: "user", parts: [{ text: "z".repeat(400) }] },
+      ],
+    };
+    const res = enforceContextWindow(body, 500);
+    expect(res.action).toBe("trimmed");
+    expect(res.turnsDropped).toBe(1);
+    expect(body.contents).toEqual([{ role: "user", parts: [{ text: "z".repeat(400) }] }]);
+  });
+
+  it("keeps a Gemini functionResponse part glued to the model turn that called it", () => {
+    const body = {
+      contents: [
+        { role: "user", parts: [{ text: "x".repeat(3000) }] },
+        { role: "model", parts: [{ functionCall: { name: "f", args: {} } }] },
+        { role: "user", parts: [{ functionResponse: { name: "f", response: {} } }] },
+        { role: "user", parts: [{ text: "z".repeat(400) }] },
+      ],
+    };
+    const res = enforceContextWindow(body, 500);
+    expect(res.turnsDropped).toBe(1);
+    const flat = body.contents.flatMap((c) => c.parts);
+    expect(flat.some((p) => p.functionCall)).toBe(flat.some((p) => p.functionResponse));
+  });
+});
+
+describe("planHistoryTrim — zone policy", () => {
+  // 12 turns of ~250 tok each (~3000 tok total) against a 2000-token budget:
+  // enough middle to shed without touching either protected zone.
+  function longConversation() {
+    const messages = [{ role: "system", content: "sys".padEnd(200, "s") }];
+    for (let t = 0; t < 12; t++) {
+      messages.push({ role: "user", content: label("u", t).padEnd(500, "x") });
+      messages.push({ role: "assistant", content: label("a", t).padEnd(500, "y") });
+    }
+    return { messages };
+  }
+  // Fixed-width so turn 1 and turn 11 stay distinguishable when sliced.
+  const label = (kind, t) => `${kind}${String(t).padStart(2, "0")}`;
+
+  it("drops out of the middle, keeping the cacheable head and the recent tail", () => {
+    const trim = planHistoryTrim(longConversation(), 2000);
+    expect(trim).not.toBeNull();
+    expect(trim.turnsDropped).toBeGreaterThan(0);
+    const kept = trim.list.map((m) => m.content.slice(0, 3));
+    // System prefix and the head's first turn survive → the cached prefix holds.
+    expect(trim.list[0].role).toBe("system");
+    expect(kept).toContain("u00");
+    // The current turn survives, and so does the turn before it (tail reserve).
+    expect(kept).toContain("u11");
+    expect(kept).toContain("u10");
+    // The loss came from the middle.
+    expect(kept).not.toContain("u05");
+  });
+
+  it("keeps the surviving prefix byte-identical as the conversation grows (cache anchor)", () => {
+    const first = planHistoryTrim(longConversation(), 2000);
+    const grown = longConversation();
+    grown.messages.push({ role: "user", content: "u12".padEnd(500, "z") });
+    const second = planHistoryTrim(grown, 2000);
+    // Same head boundary → the cached prefix is reused instead of re-billed.
+    const headOf = (t) => JSON.stringify(t.list.slice(0, 3));
+    expect(headOf(second)).toBe(headOf(first));
+  });
+
+  it("never drops the current turn, even when it alone blows the budget", () => {
+    const body = {
+      messages: [
+        { role: "user", content: "x".repeat(2000) },
+        { role: "assistant", content: "y".repeat(2000) },
+        { role: "user", content: "z".repeat(40000) },
+      ],
+    };
+    const trim = planHistoryTrim(body, 1000);
+    expect(trim.list.at(-1)).toEqual({ role: "user", content: "z".repeat(40000) });
+    // Still over budget — enforceContextWindow turns this into a reject.
+    expect(trim.estimatedPrompt).toBeGreaterThan(1000);
+  });
+
+  it("is a no-op when the body already fits", () => {
+    expect(planHistoryTrim(longConversation(), 100000)).toBeNull();
+  });
+});
+
+describe("stripHistoryForContext — capacity adapter shares the one trimmer", () => {
+  const conversation = () => ({
+    messages: [
+      { role: "system", content: "s".repeat(200) },
+      { role: "user", content: "x".repeat(3000) },
+      { role: "assistant", content: "y".repeat(3000) },
+      { role: "user", content: "z".repeat(400) },
+    ],
+  });
+
+  it("returns a trimmed copy without mutating the caller's body", () => {
+    const body = conversation();
+    const out = stripHistoryForContext(body, 500);
+    expect(out).not.toBe(body);
+    expect(body.messages).toHaveLength(4); // original untouched for the next fallback model
+    expect(out.messages.length).toBeLessThan(4);
+    expect(out.messages[0].role).toBe("system");
+    expect(out.messages.at(-1)).toEqual({ role: "user", content: "z".repeat(400) });
+  });
+
+  it("returns the same body untouched when it already fits", () => {
+    const body = conversation();
+    expect(stripHistoryForContext(body, 1000000)).toBe(body);
+  });
+
+  it("agrees with the pre-flight guard on the same conversation and window", () => {
+    const viaAdapter = stripHistoryForContext(conversation(), 500);
+    const viaGuard = conversation();
+    enforceContextWindow(viaGuard, 500);
+    expect(viaAdapter.messages).toEqual(viaGuard.messages);
   });
 });
 

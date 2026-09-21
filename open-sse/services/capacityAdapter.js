@@ -8,7 +8,8 @@
  * front only when none of the original models can handle the request — so this
  * never overrides a combo that already has a member covering the capability.
  */
-import { getCapabilitiesForModel } from "../providers/capabilities.js";
+import { DEFAULT_CAPABILITIES, getCapabilitiesForModel } from "../providers/capabilities.js";
+import { CONTEXT_SAFETY_MARGIN, planHistoryTrim } from "../translator/concerns/contextWindow.js";
 import { parseAccountPin } from "../utils/modelMarkers.js";
 
 const CAPABILITY_KEYS = ["vision", "pdf", "audioInput", "videoInput"];
@@ -102,60 +103,22 @@ export function augmentModelsWithCapacityAdapter(models, requiredCapabilities, s
   return [...pool, ...models];
 }
 
-const CHARS_PER_TOKEN = 4; // rough estimate; avoids pulling in a tokenizer dependency
-const HEAD_KEEP = 6;      // messages after system kept verbatim before dropping the middle
-
-function blockLength(content) {
-  if (typeof content === "string") return content.length;
-  if (Array.isArray(content)) {
-    return content.reduce((sum, b) => sum + (typeof b?.text === "string" ? b.text.length : 50), 0);
-  }
-  return 0;
-}
-
-// Trim history to fit a (possibly smaller) context window by dropping the MIDDLE.
-// Preserves: all system/instruction messages (head), and the trailing user run
-// carrying the media the switch happened for (tail). Older middle turns between
-// the head instructions and the current turn are dropped first.
+// Trim history to fit a (possibly smaller) context window by dropping the
+// MIDDLE, so the switch to a pool model with a shorter window still lands.
+// Delegates to the engine's single trimmer (planHistoryTrim) — this used to
+// carry its own char-based copy with a different margin and no tool-call
+// pairing, which meant an adapter switch and the pre-flight guard could trim
+// the same conversation two different ways.
+//
+// Returns a copy: the caller reuses one body across fallback attempts, so a
+// small-window pool model must not shrink the history the next model sees.
 export function stripHistoryForContext(body, contextWindow) {
-  const key = Array.isArray(body.messages) ? "messages"
-    : Array.isArray(body.input) ? "input"
-    : Array.isArray(body.contents) ? "contents"
-    : null;
-  if (!key) return body;
-  const arr = body[key];
-  if (!arr || arr.length === 0) return body;
-
-  const isSystem = (r) => r === "system" || r === "developer";
-  const systemMsgs = arr.filter((m) => isSystem(m?.role));
-  const rest = arr.filter((m) => !isSystem(m?.role));
-  if (rest.length === 0) return body;
-
-  const isAssistant = (r) => r === "assistant" || r === "model";
-  let i = rest.length - 1;
-  while (i >= 0 && !isAssistant(rest[i]?.role)) i--;
-  const tail = rest.slice(i + 1);          // current user turn (has media) — always kept
-  const older = rest.slice(0, i + 1);      // everything before it
-  if (older.length === 0) return body;
-
-  const contentOf = (m) => m.content ?? m.parts;
-  // Cap at 80% of the adapter model's context window — leaves room for the response.
-  const budgetChars = (contextWindow || 200000) * 0.8 * CHARS_PER_TOKEN;
-
-  // Prefer keeping the first HEAD_KEEP messages (initial instructions/context) verbatim;
-  // only trim further if even that exceeds the adapter model's context window.
-  const headKept = older.slice(0, HEAD_KEEP);
-  let total = systemMsgs.concat(headKept, tail).reduce((s, m) => s + blockLength(contentOf(m)), 0);
-
-  // If head + tail overflow, drop head turns from the end (closest to middle) first.
-  let head = headKept;
-  while (total > budgetChars && head.length > 0) {
-    const dropped = head.pop();
-    total -= blockLength(contentOf(dropped));
-  }
-
-  if (head.length === older.length) return body;
-  return { ...body, [key]: [...systemMsgs, ...head, ...tail] };
+  if (!body || typeof body !== "object") return body;
+  const window = Number.isFinite(contextWindow) && contextWindow > 0
+    ? contextWindow
+    : DEFAULT_CAPABILITIES.contextWindow;
+  const trim = planHistoryTrim(body, Math.floor(window * CONTEXT_SAFETY_MARGIN));
+  return trim ? trim.body : body;
 }
 
 // Wrap a handleSingleModel callback so calls to a capacity-adapter model strip
