@@ -580,7 +580,8 @@ function connectionsForPrefix(activeProviders, prefix) {
   if (!prefix) return [];
   const resolvedId = resolveProviderId(prefix);
   return activeProviders.filter((c) =>
-    c.provider === prefix || c.provider === resolvedId || c.providerSpecificData?.prefix === prefix
+    (c.provider === prefix || c.provider === resolvedId || c.providerSpecificData?.prefix === prefix) &&
+    c.isActive !== false
   );
 }
 
@@ -674,7 +675,7 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
           onChange={(e) => onEdit(setPin(model, e.target.value || null))}
           onClick={(e) => e.stopPropagation()}
           title={pinDangling ? "Pinned account no longer available — falling back by strategy" : "Route this model to a specific account"}
-          className={`max-w-[150px] shrink-0 truncate rounded border bg-transparent px-1 py-0.5 font-mono text-[11px] outline-none cursor-pointer ${
+          className={`max-w-[120px] shrink-0 truncate rounded border bg-transparent px-1 py-0.5 font-mono text-[11px] outline-none cursor-pointer ${
             pinDangling
               ? "border-yellow-500/50 text-yellow-600 dark:text-yellow-400"
               : pin
@@ -834,6 +835,7 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
         isOpen={isOpen}
         onClose={onClose}
         title={isEdit ? "Edit Combo" : "Create Combo"}
+        size="3xl"
       >
         <div className="flex flex-col gap-3">
           {/* Name */}
@@ -927,6 +929,7 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
           kindFilter={kindFilter}
           addedModelValues={models}
           closeOnSelect={false}
+          size="3xl"
         />
       )}
     </>

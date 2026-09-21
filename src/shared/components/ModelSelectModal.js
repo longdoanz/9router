@@ -81,6 +81,9 @@ export default function ModelSelectModal({
   capFilter = null,
   addedModelValues = [],
   closeOnSelect = true,
+  // Model ids run long (up to ~49 chars in the catalog), so callers that open
+  // this as the main browse surface pass a wider tier.
+  size = "md",
 }) {
   // Filter activeProviders by serviceKinds when kindFilter set (e.g. "webSearch", "webFetch")
   const filteredActiveProviders = useMemo(() => {
@@ -491,7 +494,7 @@ export default function ModelSelectModal({
         setSearchQuery("");
       }}
       title={title}
-      size="md"
+      size={size}
       className="p-4!"
       footer={null}
     >
@@ -654,4 +657,5 @@ ModelSelectModal.propTypes = {
   kindFilter: PropTypes.string,
   addedModelValues: PropTypes.arrayOf(PropTypes.string),
   closeOnSelect: PropTypes.bool,
+  size: PropTypes.oneOf(["sm", "md", "lg", "xl", "2xl", "3xl", "full"]),
 };

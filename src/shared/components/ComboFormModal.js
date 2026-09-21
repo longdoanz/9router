@@ -26,7 +26,10 @@ function ModelItem({ index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown
   })();
   const resolvedId = prefix ? resolveProviderId(prefix) : "";
   const connections = prefix
-    ? activeProviders.filter((c) => c.provider === prefix || c.provider === resolvedId || c.providerSpecificData?.prefix === prefix)
+    ? activeProviders.filter((c) =>
+        (c.provider === prefix || c.provider === resolvedId || c.providerSpecificData?.prefix === prefix) &&
+        c.isActive !== false
+      )
     : [];
   // Pinned account is gone — routing falls back by strategy, so warn rather than block.
   const pinDangling = !!pin && !activeProviders.some((c) => c.id === pin);
@@ -60,7 +63,7 @@ function ModelItem({ index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown
           value={pin && !pinDangling ? pin : ""}
           onChange={(e) => onEdit(withAccountPin(model, e.target.value || null))}
           title={pinDangling ? "Pinned account no longer available — falling back by strategy" : "Route this model to a specific account"}
-          className={`max-w-[150px] shrink-0 truncate rounded border bg-transparent px-1 py-0.5 font-mono text-[11px] outline-none cursor-pointer ${
+          className={`max-w-[120px] shrink-0 truncate rounded border bg-transparent px-1 py-0.5 font-mono text-[11px] outline-none cursor-pointer ${
             pinDangling
               ? "border-yellow-500/50 text-yellow-600 dark:text-yellow-400"
               : pin
@@ -157,7 +160,7 @@ export default function ComboFormModal({ isOpen, combo, onClose, onSave, activeP
 
   return (
     <>
-      <Modal isOpen={isOpen} onClose={onClose} title={title || (isEdit ? "Edit Combo" : "Create Combo")}>
+      <Modal isOpen={isOpen} onClose={onClose} title={title || (isEdit ? "Edit Combo" : "Create Combo")} size="3xl">
         <div className="flex flex-col gap-3">
           <div>
             {forcePrefix ? (
@@ -219,7 +222,7 @@ export default function ComboFormModal({ isOpen, combo, onClose, onSave, activeP
           onSelect={handleAddModel} onDeselect={handleDeselectModel}
           activeProviders={activeProviders} modelAliases={modelAliases}
           title="Add Model to Combo" kindFilter={kindFilter}
-          addedModelValues={models} closeOnSelect={false} />
+          addedModelValues={models} closeOnSelect={false} size="3xl" />
       )}
     </>
   );
