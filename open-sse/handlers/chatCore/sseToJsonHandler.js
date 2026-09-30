@@ -1,4 +1,5 @@
 import { convertResponsesStreamToJson } from "../../transformer/streamToJsonConverter.js";
+import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
 import { createErrorResult } from "../../utils/error.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { FORMATS } from "../../translator/formats.js";
@@ -254,7 +255,7 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
  * Handle case: provider forced streaming but client wants JSON.
  * Supports both Codex/Responses API SSE and standard Chat Completions SSE.
  */
-export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, trackDone, appendLog, reqTag, log }) {
+export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, toolNameMap, trackDone, appendLog, reqTag, log }) {
   const contentType = providerResponse.headers.get("content-type") || "";
   const isSSE = contentType.includes("text/event-stream") || (contentType === "" && isResponsesProvider(provider));
   if (!isSSE) return null; // not handled here
@@ -300,7 +301,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
       // Client is Responses API → return as-is
       if (sourceFormat === FORMATS.OPENAI_RESPONSES) {
-        return { success: true, response: new Response(JSON.stringify(jsonResponse), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
+        return { success: true, response: new Response(JSON.stringify(restoreToolNames(jsonResponse, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
       }
 
       // Build client-format response.
@@ -356,7 +357,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         };
       }
 
-      return { success: true, response: new Response(JSON.stringify(finalResp), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
+      return { success: true, response: new Response(JSON.stringify(restoreToolNames(finalResp, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
     } catch (err) {
       // Same reasoning as the chat-completions branch below: the read of the
       // upstream body is the failing step, so the message names that instead of
@@ -375,14 +376,17 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
     if (parsed.error) {
-      // Keep BAD_GATEWAY: the gateway received a response it could not complete,
-      // which is what 502 means, and the account/combo loop treats 502 and 503
-      // identically (same fallback, same cooldown). Only the MESSAGE changes —
-      // it previously named our conversion step while the real cause was the
-      // upstream stream itself.
+      // Structured error chunks may carry the real upstream status (e.g. the
+      // Qoder executor emits status 403 for billing envelopes). Preserve it so
+      // the account loop locks/falls back on the right status instead of a
+      // generic 502. Anything outside 400-599 still maps to 502.
+      const upstreamStatus = Number(parsed.error.status);
+      const status = Number.isInteger(upstreamStatus) && upstreamStatus >= 400 && upstreamStatus <= 599
+        ? upstreamStatus
+        : HTTP_STATUS.BAD_GATEWAY;
       return createErrorResult(
-        HTTP_STATUS.BAD_GATEWAY,
-        parsed.error.message || "Upstream stream failed"
+        status,
+        parsed.error.message || "Upstream SSE stream failed"
       );
     }
 
@@ -444,7 +448,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       finalBody = chatCompletionToClaudeMessage(parsed);
     }
 
-    return { success: true, response: new Response(JSON.stringify(finalBody), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
+    return { success: true, response: new Response(JSON.stringify(restoreToolNames(finalBody, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
   } catch (err) {
     // Reading the upstream body is what fails here (a reset connection rejects
     // .text()), not the conversion that follows it. Naming the conversion sent
