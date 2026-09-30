@@ -4,6 +4,7 @@ import { PROVIDER_MODELS, getModelTargetFormat } from "../../open-sse/config/pro
 import { getThinkingLevels } from "../../open-sse/providers/thinkingLevels.js";
 import { FORMATS } from "../../open-sse/translator/formats.js";
 import { OpenCodeExecutor } from "../../open-sse/executors/opencode.js";
+import { OPENCODE_FINGERPRINT_TOOLS } from "../../open-sse/utils/opencodeFingerprint.js";
 import "../translator/registerAll.js";
 import { translateRequest } from "../../open-sse/translator/index.js";
 
@@ -214,7 +215,8 @@ describe("OpenCode Free Muse Spark thinking", () => {
     // User message, function_call, function_call_output, and next user message survive
     const types = out.input.map((item) => item.type);
     expect(types).toEqual(["message", "function_call", "function_call_output", "message"]);
-    // Tools flattened and empty properties added
+    // Tools flattened and empty properties added; the free-tier fingerprint
+    // quartet (bash/glob/grep/read) is appended to every Responses request.
     expect(out.tools).toEqual([
       {
         type: "function",
@@ -222,6 +224,12 @@ describe("OpenCode Free Muse Spark thinking", () => {
         description: "Run shell command",
         parameters: { type: "object", properties: {} },
       },
+      ...OPENCODE_FINGERPRINT_TOOLS.map((name) => ({
+        type: "function",
+        name,
+        description: "This tool is currently unavailable and must not be used.",
+        parameters: { type: "object", properties: {} },
+      })),
     ]);
   });
 });
