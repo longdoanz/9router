@@ -24,8 +24,8 @@ function loadNotifier({ token = "tok", chat = "-123", runtime = "nodejs" } = {})
 }
 
 describe("telegramConfig", () => {
-  it("has a dedup window matching the gateway's 3 minutes", () => {
-    expect(TELEGRAM_CONFIG.DEDUP_WINDOW_MS).toBe(180000);
+  it("has a dedup window matching the gateway's 10 minutes", () => {
+    expect(TELEGRAM_CONFIG.DEDUP_WINDOW_MS).toBe(600000);
   });
 });
 

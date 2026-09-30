@@ -11,7 +11,7 @@ import { TELEGRAM_CONFIG } from "@/shared/constants/config.js";
  *
  * Anti-spam mirrors the Python notifier in the gateway repo so both share one
  * channel without one drowning out the other:
- *   - the same line is sent at most once per DEDUP_WINDOW_MS
+ *   - the same line is sent at most once per DEDUP_WINDOW_MS (10 minutes)
  *   - at most MAX_SENDS_PER_WINDOW messages per RATE_WINDOW_MS
  *
  * Disabled unless TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are both set.

@@ -68,7 +68,7 @@ export const TELEGRAM_CONFIG = {
   // console.error() calls are caught by their level instead, so they need no
   // marker here.
   errorPattern: /(❌|\[MITM\]\s*❌)/,
-  DEDUP_WINDOW_MS: 180000,     // same line at most once per 3 minutes
+  DEDUP_WINDOW_MS: 600000,     // same line at most once per 10 minutes
   RATE_WINDOW_MS: 60000,       // send-rate window
   MAX_SENDS_PER_WINDOW: 10,    // ceiling within RATE_WINDOW_MS
   QUEUE_MAX: 200,              // drop new entries past this, never evict old ones
