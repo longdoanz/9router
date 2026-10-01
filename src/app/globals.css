@@ -3,9 +3,11 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* Hide icon ligature text until font is ready */
-.material-symbols-outlined { opacity: 0; }
-.fonts-loaded .material-symbols-outlined { opacity: 1; transition: opacity .12s ease-out; }
+/* Use the next/font-preloaded copy (auto <link rel="preload">) instead of the
+   plain CSS @font-face from material-symbols/outlined.css — avoids the late
+   font discovery that let the 4MB icon font lose the race against slow
+   connections and fall back to visible raw ligature text (e.g. "hub", "dns"). */
+.material-symbols-outlined { font-family: var(--font-material-symbols); }
 
 /* ============================================================
    9Router palette — adopted from 9remote_private/web
