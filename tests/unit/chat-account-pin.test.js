@@ -33,6 +33,7 @@ vi.mock("@/lib/localDb", () => ({
   getComboByName: vi.fn(async (name) => (combos.models ? { name, models: combos.models } : null)),
   getModelAliases: vi.fn(async () => ({})),
   getProviderNodes: vi.fn(async () => []),
+  getProviderConnectionById: vi.fn(async () => null),
 }));
 
 import { handleChat } from "@/sse/handlers/chat.js";
