@@ -8,6 +8,7 @@ vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
 }));
 
 const { BaseExecutor } = await import("../../open-sse/executors/base.js");
+const { FETCH_CONNECT_TIMEOUT_MS, FETCH_NONSTREAM_TIMEOUT_MS } = await import("../../open-sse/config/runtimeConfig.js");
 
 function res(status) {
   return { status, headers: { get: () => "" } };
@@ -81,6 +82,44 @@ describe("BaseExecutor.execute — network error retry/fallback", () => {
     }
     expect(thrown?.message).toBe("boom");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("BaseExecutor.execute — connect timeout (stream vs non-stream)", () => {
+  // beforeEach returns fetchMock (mockReset() → mock), which vitest also invokes as a
+  // teardown with no args — tolerate that call.
+  const hang = (_url, opts) => opts && new Promise((_, reject) => {
+    opts.signal.addEventListener("abort", () => {
+      const e = new Error("aborted"); e.name = "AbortError"; reject(e);
+    });
+  });
+
+  async function runUntilAbort(stream) {
+    vi.useFakeTimers();
+    try {
+      const ex = makeExec({ baseUrl: "https://x/api", timeoutMs: FETCH_CONNECT_TIMEOUT_MS, retry: { 502: { attempts: 3, delayMs: 0 } } });
+      fetchMock.mockImplementation(hang);
+      const p = ex.execute({ model: "m", body: {}, stream, credentials: creds }).catch(e => e);
+      await vi.advanceTimersByTimeAsync(FETCH_CONNECT_TIMEOUT_MS + 1);
+      const callsAfterConnectTimeout = fetchMock.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(FETCH_NONSTREAM_TIMEOUT_MS * 5);
+      return { callsAfterConnectTimeout, err: await p };
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it("non-stream waits FETCH_NONSTREAM_TIMEOUT_MS and does not retry on timeout", async () => {
+    const { callsAfterConnectTimeout, err } = await runUntilAbort(false);
+    expect(callsAfterConnectTimeout).toBe(1); // still waiting past the stream timeout
+    expect(err.name).toBe("AbortError");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("stream keeps FETCH_CONNECT_TIMEOUT_MS and 502 retry config", async () => {
+    const { callsAfterConnectTimeout } = await runUntilAbort(true);
+    expect(callsAfterConnectTimeout).toBe(2); // first attempt timed out, retry started
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 });
 
