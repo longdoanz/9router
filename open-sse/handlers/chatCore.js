@@ -33,6 +33,7 @@ import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
 import { enforceContextWindow, isKnownContextWindow } from "../translator/concerns/contextWindow.js";
 import { defaultClaudeToolType, shouldDefaultClaudeToolType } from "../translator/concerns/toolCall.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
+import { recordUsageFromHeaders } from "../../src/sse/services/accountUsage.js";
 
 /**
  * Core chat handler - shared between SSE and Worker
@@ -524,6 +525,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     reqLogger.logError(new Error(message), finalBody || translatedBody);
     return createErrorResult(statusCode, errMsg, resetsAtMs, upstreamResponseHeaders(providerResponse.headers));
   }
+
+  // Claude/Codex report account usage on every response; feeds usage-aware affinity.
+  recordUsageFromHeaders(connectionId, providerResponse.headers);
 
   const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });

@@ -9,7 +9,19 @@
 //   - When the pinned account fails/rate-limits, the caller excludes it and
 //     re-pins to another account.
 
+import { getUsagePct } from "./accountUsage.js";
+
 const DEFAULT_AFFINITY_TTL_MINUTES = 30;
+
+// Usage-aware placement/switching (see accountUsage.js).
+// Switching a pinned conversation drops its upstream prompt cache, so it only
+// happens when that cost is already ~zero or the alternative is a failed request.
+const USAGE_EXCLUDE_PCT = 95;      // do not pin NEW conversations at/above this
+const USAGE_HOT_PCT = 80;          // pinned account considered hot at/above this
+const USAGE_CRITICAL_PCT = 97;     // about to 429: move even if cache is warm
+const USAGE_SWITCH_MARGIN = 15;    // target must have this much more headroom (anti ping-pong)
+const USAGE_BUCKET = 5;            // usages within a bucket are treated as equal → LRU decides
+const CACHE_WARM_MS = 5 * 60 * 1000; // prompt cache TTL; idle longer => cache already gone
 const AFFINITY_MAX_ENTRIES = 5000;
 
 // In-memory conversation → account pin map. In-memory is fine: a process
@@ -70,9 +82,13 @@ function lastUsedOf(conn) {
  * @param {Array} availableConnections - Account list already filtered for availability
  * @returns {object|null} The LRU connection, or null when the list is empty
  */
-export function selectLeastRecentlyUsed(availableConnections) {
+export function selectLeastRecentlyUsed(availableConnections, now = Date.now()) {
   if (!Array.isArray(availableConnections) || availableConnections.length === 0) return null;
   const sorted = [...availableConnections].sort((a, b) => {
+    // Usage first (coarse buckets), then LRU. Unknown usage counts as 0.
+    const ua = Math.floor((getUsagePct(a.id, now) ?? 0) / USAGE_BUCKET);
+    const ub = Math.floor((getUsagePct(b.id, now) ?? 0) / USAGE_BUCKET);
+    if (ua !== ub) return ua - ub;
     const ra = lastUsedOf(a);
     const rb = lastUsedOf(b);
     if (ra.time !== rb.time) return ra.time - rb.time;
@@ -106,11 +122,12 @@ export function resolveAffinityPin(conversationId, availableConnections, ttlMs, 
     now - existing.lastUsedAt < ttlMs &&
     availableConnections.some((c) => c.id === existing.connectionId)
   ) {
-    // Still valid and available → keep the same account (preserve cache).
-    pinnedId = existing.connectionId;
+    // Still valid and available → keep the same account (preserve cache),
+    // unless a switch is cheap or unavoidable.
+    pinnedId = maybeSwitch(existing, availableConnections, now) ?? existing.connectionId;
   } else {
-    // New conversation, expired pin, or pinned account gone → re-pin to LRU.
-    pinnedId = selectLeastRecentlyUsed(availableConnections)?.id ?? null;
+    // New conversation, expired pin, or pinned account gone → pick by usage, then LRU.
+    pinnedId = pickForNewPin(availableConnections, now)?.id ?? null;
   }
 
   if (pinnedId) {
@@ -121,4 +138,32 @@ export function resolveAffinityPin(conversationId, availableConnections, ttlMs, 
     }
   }
   return pinnedId;
+}
+
+/** Best account for a new pin: skip nearly-exhausted ones unless nothing else is left. */
+function pickForNewPin(availableConnections, now) {
+  const roomy = availableConnections.filter((c) => (getUsagePct(c.id, now) ?? 0) < USAGE_EXCLUDE_PCT);
+  return selectLeastRecentlyUsed(roomy.length ? roomy : availableConnections, now);
+}
+
+/**
+ * Decide whether to move an active conversation off its pinned account.
+ * Moving loses the prompt cache, so only when:
+ *  - the account is critical (a 429 is imminent) and another has room; or
+ *  - the account is hot, the cache has already expired from idleness (free
+ *    move), and another account has clearly more headroom (hysteresis).
+ * @returns {string|null} new connection id, or null to stay
+ */
+function maybeSwitch(existing, availableConnections, now) {
+  const pinnedPct = getUsagePct(existing.connectionId, now);
+  if (pinnedPct == null || pinnedPct < USAGE_HOT_PCT) return null;
+  const others = availableConnections.filter((c) => c.id !== existing.connectionId);
+  const target = pickForNewPin(others, now);
+  if (!target) return null;
+  const targetPct = getUsagePct(target.id, now) ?? 0;
+
+  if (pinnedPct >= USAGE_CRITICAL_PCT && targetPct < USAGE_EXCLUDE_PCT) return target.id;
+  const cacheCold = now - existing.lastUsedAt >= CACHE_WARM_MS;
+  if (cacheCold && targetPct <= pinnedPct - USAGE_SWITCH_MARGIN) return target.id;
+  return null;
 }
