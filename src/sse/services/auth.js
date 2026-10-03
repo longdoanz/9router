@@ -12,6 +12,10 @@ let selectionMutex = Promise.resolve();
 
 const GITHUB_MONTHLY_USAGE_LIMIT = "you've reached your additional usage limit for your plan";
 
+const EXACT_RESET_PROVIDERS = new Set(["claude", "codex"]);
+// Sanity ceiling for a provider-reported reset (weekly windows are 7d).
+const MAX_EXACT_RESET_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
+
 function githubMonthlyResetMs(status, errorText, provider) {
   if (resolveProviderId(provider) !== "github" || Number(status) !== 402) return null;
   if (!String(errorText || "").toLowerCase().includes(GITHUB_MONTHLY_USAGE_LIMIT)) return null;
@@ -280,10 +284,14 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     newBackoffLevel = 0;
   } else if (resetsAtMs && resetsAtMs > Date.now()) {
     shouldFallback = true;
-    // Antigravity quota API provides exact per-model resetAt. Do not truncate it.
-    cooldownMs = resolveProviderId(provider) === "antigravity"
+    // Antigravity/Claude/Codex report the exact reset (5h / weekly windows). Keep it
+    // instead of truncating to 30min, which would re-probe the dead account.
+    const providerId = resolveProviderId(provider);
+    cooldownMs = providerId === "antigravity"
       ? resetsAtMs - Date.now()
-      : Math.min(resetsAtMs - Date.now(), MAX_RATE_LIMIT_COOLDOWN_MS);
+      : EXACT_RESET_PROVIDERS.has(providerId)
+        ? Math.min(resetsAtMs - Date.now(), MAX_EXACT_RESET_COOLDOWN_MS)
+        : Math.min(resetsAtMs - Date.now(), MAX_RATE_LIMIT_COOLDOWN_MS);
     newBackoffLevel = 0;
   } else {
     ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel, resolveProviderId(provider)));

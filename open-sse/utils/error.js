@@ -1,4 +1,5 @@
 import { ERROR_TYPES, DEFAULT_ERROR_MESSAGES } from "../config/errorConfig.js";
+import { parseResetFromHeaders } from "./rateLimitReset.js";
 
 /**
  * Build OpenAI-compatible error response body
@@ -64,13 +65,16 @@ export async function parseUpstreamError(response, executor = null) {
     bodyText = "";
   }
 
+  // Generic hint from rate-limit headers; executor-specific values win over it.
+  const headerResetMs = response.status === 429 ? parseResetFromHeaders(response.headers) : null;
+
   // Let executor-specific parser extract provider-specific fields (e.g. codex resetsAtMs)
   if (executor && typeof executor.parseError === "function") {
     try {
       const parsed = executor.parseError(response, bodyText);
       if (parsed && typeof parsed === "object") {
         const msg = parsed.message || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
-        return { statusCode: parsed.status || response.status, message: msg, resetsAtMs: parsed.resetsAtMs };
+        return { statusCode: parsed.status || response.status, message: msg, resetsAtMs: parsed.resetsAtMs ?? headerResetMs ?? undefined };
       }
     } catch { /* fall through to default parsing */ }
   }
@@ -86,7 +90,7 @@ export async function parseUpstreamError(response, executor = null) {
   const messageStr = typeof message === "string" ? message : JSON.stringify(message);
   const finalMessage = messageStr || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
 
-  return { statusCode: response.status, message: finalMessage };
+  return { statusCode: response.status, message: finalMessage, resetsAtMs: headerResetMs ?? undefined };
 }
 
 /**
