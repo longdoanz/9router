@@ -1,9 +1,28 @@
 import { Readable } from "stream";
-import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
+import { MEMORY_CONFIG, UPSTREAM_SOCKET_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { dbg } from "./debugLog.js";
 
 const originalFetch = globalThis.fetch;
 const proxyDispatchers = new Map();
+
+// undici's default 300s headers/body timeouts undercut our own watchdogs; every
+// dispatcher we create (and the global one) uses this backstop instead.
+const SOCKET_TIMEOUTS = { headersTimeout: UPSTREAM_SOCKET_TIMEOUT_MS, bodyTimeout: UPSTREAM_SOCKET_TIMEOUT_MS };
+
+let globalDispatcherReady = null;
+/**
+ * Install a global undici dispatcher with SOCKET_TIMEOUTS, once. Covers every
+ * fetch without an explicit dispatcher (Node's built-in fetch reads the same
+ * global symbol). Failure is non-fatal: fetch keeps working on undici defaults.
+ */
+function ensureGlobalDispatcher() {
+  if (!globalDispatcherReady) {
+    globalDispatcherReady = import("undici")
+      .then(({ Agent, setGlobalDispatcher }) => setGlobalDispatcher(new Agent(SOCKET_TIMEOUTS)))
+      .catch((e) => console.warn(`[ProxyFetch] global dispatcher not installed: ${e.message}`));
+  }
+  return globalDispatcherReady;
+}
 
 // ─── TLS fingerprinting via got-scraping (browser-like JA3) ───────────────
 // Disabled: not in use. Kept commented for future re-enable.
@@ -243,8 +262,8 @@ async function getDispatcher(proxyUrl, insecure = false) {
     const { Agent, ProxyAgent } = await import("undici");
     const connect = insecure ? { rejectUnauthorized: false } : undefined;
     const dispatcher = normalized
-      ? new ProxyAgent({ uri: normalized, ...(insecure ? { requestTls: connect } : {}) })
-      : new Agent({ connect });
+      ? new ProxyAgent({ uri: normalized, ...SOCKET_TIMEOUTS, ...(insecure ? { requestTls: connect } : {}) })
+      : new Agent({ connect, ...SOCKET_TIMEOUTS });
     proxyDispatchers.set(key, dispatcher);
   }
 
@@ -331,6 +350,7 @@ async function createBypassRequest(parsedUrl, realIP, options) {
 
 export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
   const targetUrl = typeof url === "string" ? url : url.toString();
+  await ensureGlobalDispatcher();
 
   // Vercel relay: forward request via relay headers
   const vercelRelayUrl = normalizeString(proxyOptions?.vercelRelayUrl);

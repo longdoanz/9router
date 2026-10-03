@@ -62,6 +62,16 @@ export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1
 // completion is generated (large prompts can take minutes). Env: FETCH_NONSTREAM_TIMEOUT_MS.
 export const FETCH_NONSTREAM_TIMEOUT_MS = envMs("FETCH_NONSTREAM_TIMEOUT_MS", 540 * 1000);
 
+// Socket-level backstop for every upstream fetch (undici headersTimeout/bodyTimeout).
+// undici defaults both to 300s, which silently undercuts FETCH_NONSTREAM_TIMEOUT_MS and
+// STREAM_STALL_TIMEOUT_MS above — a non-stream completion would die at 300s instead of
+// 540s. Kept above every watchdog so ours always fire first with a proper error.
+// Env: UPSTREAM_SOCKET_TIMEOUT_MS.
+export const UPSTREAM_SOCKET_TIMEOUT_MS = envMs(
+  "UPSTREAM_SOCKET_TIMEOUT_MS",
+  Math.max(STREAM_STALL_TIMEOUT_MS, STREAM_FIRST_CHUNK_TIMEOUT_MS, FETCH_NONSTREAM_TIMEOUT_MS) + 60 * 1000
+);
+
 // Gemini native TTS fetch timeout: abort if Google does not return response headers in time.
 export const GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS = envMs("GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS", 45 * 1000);
 
