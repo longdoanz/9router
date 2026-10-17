@@ -5,9 +5,10 @@ import { getMeta, setMeta } from "../helpers/metaStore.js";
 
 function maskApiKey(key) {
   if (!key || typeof key !== "string") return null;
-  if (key.length <= 12) return key.charAt(0) + "***";
+  const trimmed = key.trim();
+  if (trimmed.length <= 12) return trimmed.charAt(0) + "***";
   // Keep the tail: keys sharing a machine-id prefix (team keys) must not collide.
-  return key.slice(0, 8) + "***" + key.slice(-4);
+  return trimmed.slice(0, 8) + "***" + trimmed.slice(-4);
 }
 
 const PENDING_TIMEOUT_MS = 60 * 1000;
@@ -37,9 +38,13 @@ const EPOCH_MS_SQL =
 // json_extract raises on malformed JSON, hence the json_valid guard; a NULL or
 // unparseable blob yields NULL and then 0, matching parseJson's `{}` fallback.
 const jsonToken = (path) => `CASE WHEN json_valid(tokens) = 1 THEN json_extract(tokens, '${path}') END`;
-const TOKENS_PROMPT_SQL = `COALESCE(${jsonToken("$.prompt_tokens")}, 0)`;
-const TOKENS_COMPLETION_SQL = `COALESCE(${jsonToken("$.completion_tokens")}, 0)`;
 // NULLIF mirrors JS `||`, which falls through on 0 and not just on undefined.
+// Rows recorded with input_tokens/output_tokens (embeddings, Gemini) fall back
+// to those keys, then to the persisted promptTokens/completionTokens columns.
+const TOKENS_PROMPT_SQL =
+  `COALESCE(NULLIF(${jsonToken("$.prompt_tokens")}, 0), NULLIF(${jsonToken("$.input_tokens")}, 0), promptTokens, 0)`;
+const TOKENS_COMPLETION_SQL =
+  `COALESCE(NULLIF(${jsonToken("$.completion_tokens")}, 0), NULLIF(${jsonToken("$.output_tokens")}, 0), completionTokens, 0)`;
 const TOKENS_CACHED_SQL =
   `COALESCE(NULLIF(${jsonToken("$.cached_tokens")}, 0), ${jsonToken("$.cache_read_input_tokens")}, 0)`;
 
@@ -428,7 +433,9 @@ export async function getUsageStats(period = "all") {
   let allApiKeys = [];
   try { allApiKeys = await getApiKeys(); } catch {}
   const apiKeyMap = {};
-  for (const k of allApiKeys) apiKeyMap[k.key] = { name: k.name, id: k.id, createdAt: k.createdAt };
+  for (const k of allApiKeys) {
+    if (k.key) apiKeyMap[k.key.trim()] = { name: k.name, id: k.id, createdAt: k.createdAt };
+  }
 
   // recentRequests from live history (last 100 entries enough for 20 deduped)
   const recentRows = db.all(`SELECT timestamp, provider, model, tokens, status FROM usageHistory ORDER BY id DESC LIMIT 100`);
@@ -570,10 +577,10 @@ export async function getUsageStats(period = "all") {
         const rawModel = ak.rawModel || "";
         const provider = ak.provider || "";
         const providerDisplayName = providerNodeNameMap[provider] || provider;
-        const apiKeyVal = ak.apiKey;
+        const apiKeyVal = ak.apiKey ? ak.apiKey.trim() : null;
         const keyInfo = apiKeyVal ? apiKeyMap[apiKeyVal] : null;
-        const keyName = keyInfo?.name || (apiKeyVal ? apiKeyVal.slice(0, 8) + "..." : "Local (No API Key)");
         const apiKeyMasked = maskApiKey(apiKeyVal);
+        const keyName = keyInfo?.name || (apiKeyVal ? (apiKeyMasked || apiKeyVal.slice(0, 8) + "...") : "Local (No API Key)");
         const apiKeyKey = apiKeyMasked || "local-no-key";
         if (!stats.byApiKey[akKey]) {
           stats.byApiKey[akKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel, provider: providerDisplayName, apiKeyMasked, keyName, apiKeyKey, lastUsed: dateKey };
@@ -718,9 +725,10 @@ export async function getUsageStats(period = "all") {
       }
 
       if (r.apiKey && typeof r.apiKey === "string") {
-        const keyInfo = apiKeyMap[r.apiKey];
-        const keyName = keyInfo?.name || r.apiKey.slice(0, 8) + "...";
-        const apiKeyMasked = maskApiKey(r.apiKey);
+        const apiKeyVal = r.apiKey.trim();
+        const keyInfo = apiKeyMap[apiKeyVal];
+        const apiKeyMasked = maskApiKey(apiKeyVal);
+        const keyName = keyInfo?.name || apiKeyMasked || r.apiKey.slice(0, 8) + "...";
         // Key by the FULL api key (same as the daily rollup + lastUsed overlay)
         // — masking here collided all keys sharing a prefix into one bucket.
         const akKey = `${r.apiKey}|${r.model}|${r.provider || "unknown"}`;

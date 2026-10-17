@@ -77,16 +77,18 @@ describe("getUsageStats 24h — SQL aggregation", () => {
     expect(stats.totalCachedTokens).toBe(77 + 55 + 3);
   });
 
-  it("ignores the promptTokens/completionTokens columns, exactly as the blob-reading loop did", async () => {
+  it("falls back blob prompt/completion -> input/output -> the columns, like the JS `||` chain", async () => {
     adapter.run(`DELETE FROM usageHistory`);
+    // Blob values win over the columns.
     insert({ promptTokensCol: 9999, completionTokensCol: 8888, tokens: JSON.stringify({ prompt_tokens: 4, completion_tokens: 2 }) });
-    // input_tokens/output_tokens are an Anthropic-shaped blob the 24h branch
-    // deliberately does not read (the daily rollup does).
+    // Anthropic/Gemini-shaped blob (input_tokens/output_tokens).
     insert({ tokens: JSON.stringify({ input_tokens: 500, output_tokens: 300 }) });
+    // No token counts in the blob: the persisted columns are used.
+    insert({ promptTokensCol: 40, completionTokensCol: 20, tokens: JSON.stringify({}) });
 
     const stats = await db.getUsageStats("24h");
-    expect(stats.totalPromptTokens).toBe(4);
-    expect(stats.totalCompletionTokens).toBe(2);
+    expect(stats.totalPromptTokens).toBe(4 + 500 + 40);
+    expect(stats.totalCompletionTokens).toBe(2 + 300 + 20);
   });
 
   it("keeps every breakdown separate while collapsing rows into groups", async () => {
