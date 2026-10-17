@@ -277,6 +277,15 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
     // Account selection shown in the unified "▶" line (acc:...)
     const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
+    // Refresh token dead (now marked expired) — skip straight to the next account.
+    if (refreshedCredentials.refreshUnrecoverable) {
+      log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} EXPIRED (re-auth required) → NEXT ACCOUNT`);
+      excludeConnectionIds.add(credentials.connectionId);
+      lastError = `[${provider}] ${credentials.connectionName}: refresh token expired — re-authorize`;
+      // 503, not 401: the client's key is fine — our upstream credential is not.
+      lastStatus = HTTP_STATUS.SERVICE_UNAVAILABLE;
+      continue;
+    }
 
     // Ensure real project ID is available for providers that need it (P0 fix: cold miss)
     if ((provider === "antigravity" || provider === "gemini-cli") && !refreshedCredentials.projectId) {

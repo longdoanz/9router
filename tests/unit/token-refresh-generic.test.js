@@ -78,11 +78,18 @@ describe("refreshAccessToken — config-driven profiles", () => {
     expect(parsed).not.toHaveProperty("client_secret");
   });
 
-  it("returns null on non-ok response", async () => {
+  it("returns null on a transient non-ok response", async () => {
+    mockFetchOnce({ error: "temporarily_unavailable" }, { ok: false, status: 503 });
+    const { refreshAccessToken } = await import("open-sse/services/tokenRefresh/providers.js");
+    const out = await refreshAccessToken("iflow", "flaky", {}, console);
+    expect(out).toBeNull();
+  });
+
+  it("reports invalid_grant as unrecoverable (re-auth required)", async () => {
     mockFetchOnce({ error: "invalid_grant" }, { ok: false, status: 400 });
     const { refreshAccessToken } = await import("open-sse/services/tokenRefresh/providers.js");
     const out = await refreshAccessToken("iflow", "dead", {}, console);
-    expect(out).toBeNull();
+    expect(out).toEqual({ error: "unrecoverable_refresh_error", code: "invalid_grant", status: 400 });
   });
 
   it("returns null when refreshToken missing", async () => {

@@ -21,7 +21,8 @@ import {
   getAllAccessTokens as _getAllAccessTokens,
   refreshKiroToken as _refreshKiroToken,
   refreshNousToken as _refreshNousToken,
-  getRefreshLeadMs as _getRefreshLeadMs
+  getRefreshLeadMs as _getRefreshLeadMs,
+  isUnrecoverableRefreshError,
 } from "open-sse/services/tokenRefresh.js";
 import {
   refreshProviderCredentials as _refreshProviderCredentials,
@@ -214,6 +215,60 @@ export async function updateProviderCredentials(connectionId, newCredentials) {
   }
 }
 
+// ─── Local-specific: unrecoverable refresh → mark connection expired ─────────
+
+export const EXPIRED_TEST_STATUS = "expired";
+
+/**
+ * Mark a connection expired after an unrecoverable refresh (refresh token
+ * expired/revoked/reused). Background refresh and account selection skip
+ * expired connections until the user re-authorizes (which resets testStatus).
+ *
+ * Skipped when the DB already holds a different refresh token: a concurrent
+ * refresh rotated it, so the failure was against a stale snapshot.
+ *
+ * @param {string} provider
+ * @param {object} creds - credentials used for the failed refresh
+ * @param {object} failure - unrecoverable refresh result
+ * @returns {Promise<boolean>} true if the connection was marked expired
+ */
+export async function markConnectionExpired(provider, creds, failure) {
+  if (!creds?.connectionId) return false;
+  try {
+    const latest = await getProviderConnectionById(creds.connectionId).catch(() => null);
+    if (latest?.refreshToken && creds.refreshToken && latest.refreshToken !== creds.refreshToken) {
+      log.info("TOKEN_REFRESH", "Refresh token rotated concurrently — not marking expired", {
+        provider,
+        connectionId: creds.connectionId,
+      });
+      return false;
+    }
+    if (latest?.testStatus === EXPIRED_TEST_STATUS) return true;
+
+    const code = failure?.code || failure?.error || "unrecoverable_refresh_error";
+    const reason = `Refresh token expired or revoked (${code}) — re-authorize this connection`;
+    await updateProviderConnection(creds.connectionId, {
+      testStatus: EXPIRED_TEST_STATUS,
+      lastError: reason,
+      errorCode: failure?.status || 401,
+      lastErrorAt: new Date().toISOString(),
+    });
+
+    const connName = creds.connectionName || latest?.displayName || latest?.name
+      || latest?.email || creds.connectionId.slice(0, 8);
+    // Forwarded to the Telegram alert channel; emitted once per expiry.
+    console.error(`❌ ${provider} [expired] (${connName}): ${reason}`);
+    return true;
+  } catch (error) {
+    log.error("TOKEN_REFRESH", "Failed to mark connection expired", {
+      provider,
+      connectionId: creds.connectionId,
+      error: error?.message ?? String(error),
+    });
+    return false;
+  }
+}
+
 // ─── Local-specific: proactive token refresh ─────────────────────────────────
 
 /**
@@ -267,6 +322,10 @@ export async function checkAndRefreshToken(provider, credentials, options = {}) 
     });
 
     const newCreds = await _refreshProviderCredentials(provider, creds, log);
+    if (isUnrecoverableRefreshError(newCreds)) {
+      await markConnectionExpired(provider, creds, newCreds);
+      return { ...creds, testStatus: EXPIRED_TEST_STATUS, refreshUnrecoverable: true };
+    }
     if (newCreds?.accessToken || newCreds?.apiKey || newCreds?.copilotToken) {
       const mergedCreds = {
         ...newCreds,

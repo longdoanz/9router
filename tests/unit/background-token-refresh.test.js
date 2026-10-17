@@ -80,6 +80,20 @@ describe("selectConnectionsNeedingRefresh", () => {
     expect(list).toHaveLength(0);
   });
 
+  it("skips connections marked expired (unrecoverable refresh)", async () => {
+    const { selectConnectionsNeedingRefresh } = await import(
+      "../../src/sse/services/backgroundTokenRefresh.js"
+    );
+    const list = selectConnectionsNeedingRefresh(
+      [
+        conn({ testStatus: "expired", expiresAt: new Date(NOW - 60 * 1000).toISOString() }),
+        conn({ id: "c2", testStatus: "unavailable", expiresAt: new Date(NOW - 60 * 1000).toISOString() }),
+      ],
+      NOW
+    );
+    expect(list.map((c) => c.id)).toEqual(["c2"]);
+  });
+
   it("selects already-expired oauth connection", async () => {
     const { selectConnectionsNeedingRefresh } = await import(
       "../../src/sse/services/backgroundTokenRefresh.js"

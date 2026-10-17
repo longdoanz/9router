@@ -40,6 +40,7 @@ function isNonServerRuntime() {
 /**
  * Pure selection: OAuth connections with a refreshToken whose access token
  * expires within max(provider on-request lead, BACKGROUND_REFRESH_LEAD_MS).
+ * Connections marked expired (unrecoverable refresh) are skipped.
  *
  * @param {Array<object>} connections
  * @param {number} [nowMs]
@@ -55,6 +56,8 @@ export function selectConnectionsNeedingRefresh(connections, nowMs = Date.now())
     const authType = String(conn.authType || "").toLowerCase().replace(/_/g, "");
     if (authType !== "oauth") continue;
     if (!conn.refreshToken) continue;
+    // Refresh token is dead until re-auth — retrying only spams logs/alerts.
+    if (conn.testStatus === "expired") continue;
 
     const expiresAtMs = getCredentialExpiryMs(conn);
     if (expiresAtMs === null) continue;

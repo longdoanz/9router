@@ -92,6 +92,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     // Filter out model-locked, excluded, and Antigravity quota-exhausted connections.
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
+      // Unrecoverable refresh failure: unusable until the user re-authorizes.
+      if (c.testStatus === "expired") return false;
       if (isModelLockActive(c, model)) return false;
       const enabled = c.providerSpecificData?.enabledModels;
       if (providerId === "codex" && Array.isArray(enabled) && enabled.length && requestedModel && !enabled.includes(requestedModel)) return false;
@@ -308,7 +310,8 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
 
   await updateProviderConnection(connectionId, {
     ...lockUpdate,
-    testStatus: "unavailable",
+    // Keep "expired": a cooldown must not mask a connection that needs re-auth.
+    testStatus: conn?.testStatus === "expired" ? "expired" : "unavailable",
     lastError: reason,
     errorCode: status,
     lastErrorAt: new Date().toISOString(),

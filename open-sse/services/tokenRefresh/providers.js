@@ -115,6 +115,11 @@ export async function refreshAccessToken(provider, refreshToken, credentials, lo
         status: response.status,
         error: errorText,
       });
+      // Expired/revoked refresh token never recovers on retry — signal re-auth.
+      const failure = classifyOAuthRefreshError(errorText, response.status);
+      if (failure.permanent) {
+        return { error: "unrecoverable_refresh_error", code: failure.code, status: response.status };
+      }
       return null;
     }
 
