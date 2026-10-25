@@ -146,6 +146,34 @@ describe("enforceContextWindow", () => {
     expect(hasToolUse).toBe(hasToolResult);
   });
 
+  it("keeps a tool_result glued to its tool_use when the same user message also carries text", () => {
+    // Claude Code appends <system-reminder> text blocks to the user message that
+    // carries the tool results. That message still answers the previous
+    // assistant turn: treating it as a turn boundary let the trim drop the
+    // tool_use and keep the tool_result, and Anthropic rejected the request
+    // with a 400 ("unexpected `tool_use_id` found in `tool_result` blocks").
+    const body = {
+      messages: [
+        { role: "user", content: "a".repeat(400) },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "f", input: {} }] },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "t1", content: "x".repeat(3000) },
+            { type: "text", text: "<system-reminder>todo list changed</system-reminder>" },
+          ],
+        },
+        { role: "assistant", content: [{ type: "text", text: "done" }] },
+        { role: "user", content: "z".repeat(400) },
+      ],
+    };
+    const res = enforceContextWindow(body, 900);
+    expect(res.action).toBe("trimmed");
+    const ids = (type, field) => body.messages.flatMap((m) =>
+      Array.isArray(m.content) ? m.content.filter((b) => b.type === type).map((b) => b[field]) : []);
+    expect(ids("tool_result", "tool_use_id")).toEqual(ids("tool_use", "id"));
+  });
+
   it("still rejects when only one turn is left and it alone overflows", () => {
     const body = { messages: [{ role: "user", content: "x".repeat(20000) }] };
     const res = enforceContextWindow(body, 1000);
@@ -188,6 +216,41 @@ describe("enforceContextWindow", () => {
     expect(res.turnsDropped).toBe(1);
     const flat = body.contents.flatMap((c) => c.parts);
     expect(flat.some((p) => p.functionCall)).toBe(flat.some((p) => p.functionResponse));
+  });
+});
+
+describe("estimateBodyTokens — inline images", () => {
+  // ~2 MB of base64 would be ~500k tokens at chars/4; upstreams bill ~1600.
+  const b64 = "A".repeat(2_000_000);
+
+  it.each([
+    ["claude", { messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: b64 } }] }] }],
+    ["openai", { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } }] }] }],
+    ["responses", { input: [{ role: "user", content: [{ type: "input_image", image_url: `data:image/png;base64,${b64}` }] }] }],
+    ["gemini", { contents: [{ role: "user", parts: [{ inlineData: { mimeType: "image/png", data: b64 } }] }] }],
+  ])("counts a %s inline image at a flat cost, not by its base64 length", (_shape, body) => {
+    const est = estimateBodyTokens(body);
+    expect(est).toBeGreaterThanOrEqual(1600);
+    expect(est).toBeLessThan(2000);
+  });
+
+  it("still counts non-image base64 (e.g. a PDF document) by size", () => {
+    const body = { messages: [{ role: "user", content: [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: b64 } }] }] };
+    expect(estimateBodyTokens(body)).toBeGreaterThan(400_000);
+  });
+
+  it("does not trim a conversation whose only bulk is screenshots", () => {
+    const shot = { type: "image", source: { type: "base64", media_type: "image/png", data: b64 } };
+    const body = {
+      messages: [
+        { role: "user", content: [shot, { type: "text", text: "what is wrong here?" }] },
+        { role: "assistant", content: "a layout bug" },
+        { role: "user", content: "fix it" },
+      ],
+    };
+    const res = enforceContextWindow(body, 200_000);
+    expect(res.turnsDropped).toBe(0);
+    expect(body.messages).toHaveLength(3);
   });
 });
 

@@ -62,6 +62,45 @@ function estimateTokens(text) {
   return Math.ceil(cjk + (text.length - cjk) / 4);
 }
 
+// Upstreams bill an image by its pixels, not its encoded size: Anthropic resizes
+// anything past ~1.15 MP and caps an image at ~1600 tokens, OpenAI/Gemini land
+// in the same range. Counting the base64 payload at chars/4 instead turns one
+// 2 MB screenshot into ~500k "tokens" — enough to make the guard trim a
+// conversation that really sits at a fraction of the window.
+const IMAGE_TOKENS = 1600;
+const DATA_IMAGE_URI_RE = /^data:image\//i;
+
+/** Whether `node` holds an inline base64 image in one of the supported wire shapes. */
+function inlineImageKey(node) {
+  // Claude: { type: "base64", media_type: "image/png", data }
+  if (node.type === "base64" && typeof node.data === "string" && /^image\//i.test(node.media_type || "")) return "data";
+  // Gemini: { inlineData: { mimeType: "image/png", data } } — this is the inner object.
+  if (typeof node.data === "string" && /^image\//i.test(node.mimeType || node.mime_type || "")) return "data";
+  // OpenAI chat: { image_url: { url: "data:image/..." } } — this is the inner object.
+  if (typeof node.url === "string" && DATA_IMAGE_URI_RE.test(node.url)) return "url";
+  // Responses: { type: "input_image", image_url: "data:image/..." }
+  if (typeof node.image_url === "string" && DATA_IMAGE_URI_RE.test(node.image_url)) return "image_url";
+  return null;
+}
+
+/** Token estimate for any JSON value, counting inline images at IMAGE_TOKENS each. */
+function estimateValueTokens(value) {
+  let images = 0;
+  let text;
+  try {
+    text = JSON.stringify(value, (_k, v) => {
+      if (!v || typeof v !== "object" || Array.isArray(v)) return v;
+      const key = inlineImageKey(v);
+      if (!key) return v;
+      images++;
+      return { ...v, [key]: "" };
+    }) || "";
+  } catch {
+    return 0;
+  }
+  return estimateTokens(text) + images * IMAGE_TOKENS;
+}
+
 /**
  * Rough token count for a translated request body. Format-agnostic: serializes
  * the whole body, so tools/system/params are counted too, not just the history.
@@ -69,13 +108,7 @@ function estimateTokens(text) {
  * to keep an overflowing request off the wire.
  */
 export function estimateBodyTokens(body) {
-  let text;
-  try {
-    text = JSON.stringify(body) || "";
-  } catch {
-    return 0;
-  }
-  return estimateTokens(text);
+  return estimateValueTokens(body);
 }
 
 // estimateBodyTokens is a chars/4 heuristic, not the upstream's real tokenizer
@@ -130,18 +163,23 @@ function isSystemRole(role) {
 }
 
 /**
- * A `role: "user"` entry carrying nothing but tool results is not a real turn
- * boundary — it belongs with the assistant turn that requested it. Claude
- * relays them as user-role messages of `tool_result` blocks and Gemini as
- * user-role `functionResponse` parts; OpenAI uses `role: "tool"` and Responses
- * a roleless `function_call_output`, neither of which is role "user", so they
- * are already non-boundaries.
+ * A `role: "user"` entry carrying any tool result is not a real turn boundary —
+ * it belongs with the assistant turn that requested it. Claude relays them as
+ * user-role messages of `tool_result` blocks and Gemini as user-role
+ * `functionResponse` parts; OpenAI uses `role: "tool"` and Responses a roleless
+ * `function_call_output`, neither of which is role "user", so they are already
+ * non-boundaries.
+ *
+ * Any, not only: Claude Code appends text blocks (<system-reminder>, queued user
+ * input) to the same message as the tool results. Splitting there would let a
+ * trim drop the tool_use while keeping its tool_result, which Anthropic rejects
+ * with a 400 ("unexpected `tool_use_id` found in `tool_result` blocks").
  */
 function isToolResultCarrier(msg) {
   if (!msg || msg.role !== "user") return false;
   const blocks = Array.isArray(msg.content) ? msg.content : Array.isArray(msg.parts) ? msg.parts : null;
   if (!blocks || blocks.length === 0) return false;
-  return blocks.every((b) => b && typeof b === "object" && (b.type === "tool_result" || b.functionResponse));
+  return blocks.some((b) => b && typeof b === "object" && (b.type === "tool_result" || b.functionResponse));
 }
 
 /**
@@ -202,7 +240,7 @@ export function planHistoryTrim(body, budgetTokens) {
 
   // Per-turn costs let us choose the drop set with one pass instead of
   // re-serializing the whole body after every single drop.
-  const cost = turns.map((turn) => estimateTokens(JSON.stringify(turn)));
+  const cost = turns.map((turn) => estimateValueTokens(turn));
   const keep = turns.map(() => true);
   const lastIdx = turns.length - 1;
 
