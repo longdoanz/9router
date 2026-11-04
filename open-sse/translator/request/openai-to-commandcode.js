@@ -12,9 +12,8 @@
  */
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
-import { randomUUID } from "crypto";
-import { toStableUuid } from "../../utils/sessionManager.js";
 import { ROLE, OPENAI_BLOCK, CLAUDE_BLOCK } from "../schema/index.js";
+import { COMMAND_CODE_WORKING_DIR, toCommandCodeSessionUuid } from "../../shared/commandCodeHeaders.js";
 import { DEFAULT_MAX_TOKENS } from "../../config/runtimeConfig.js";
 import { parseDataUri, encodeDataUri } from "../concerns/image.js";
 
@@ -201,21 +200,12 @@ export function openaiToCommandCodeRequest(model, body, stream, credentials) {
 
   const today = new Date().toISOString().slice(0, 10);
 
-  // Pin the thread to the conversation-stable session id (already resolved by
-  // translateRequest into credentials._clientSessionId). A fresh random threadId
-  // per request would force the upstream to treat every turn as a new thread and
-  // drop prompt cache. CommandCode validates threadId as a UUID, so the stable
-  // session id is hashed into a deterministic UUID rather than sent verbatim
-  // (sending e.g. "claude:…" would be rejected with "Invalid UUID at threadId").
-  const threadId = credentials?._clientSessionId
-    ? toStableUuid(credentials._clientSessionId)
-    : randomUUID();
-
   return {
-    threadId,
+    // Conversation-stable (session captured by translateRequest); the executor reuses it as x-session-id.
+    threadId: toCommandCodeSessionUuid(credentials?._clientSessionId),
     memory: "",
     config: {
-      workingDir: process.cwd(),
+      workingDir: COMMAND_CODE_WORKING_DIR,
       date: today,
       environment: process.platform,
       structure: [],
