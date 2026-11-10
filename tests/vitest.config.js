@@ -17,6 +17,7 @@ export default defineConfig({
     maxConcurrency: 60,
     // Suppress noisy console output from handlers under test
     silent: false,
+    setupFiles: ["./setup-undici-fetch-mock.js"],
   },
   resolve: {
     // Use array form so subpath aliases (e.g. "@/lib/db/index.js") resolve correctly.
