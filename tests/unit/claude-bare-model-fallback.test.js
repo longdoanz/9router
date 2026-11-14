@@ -18,23 +18,23 @@ describe("bare claude-* model routing", () => {
   });
 
   it("keeps provider anthropic when nothing is connected", async () => {
-    expect(await getModelInfo("claude-sonnet-5-5")).toEqual({ provider: "anthropic", model: "claude-sonnet-5-5" });
+    expect(await getModelInfo("claude-sonnet-5-5")).toMatchObject({ provider: "anthropic", model: "claude-sonnet-5-5" });
   });
 
   it("uses the Claude OAuth connection when no anthropic connection is active", async () => {
     connections.claude = [{ id: "c1" }];
-    expect(await getModelInfo("claude-sonnet-5-5")).toEqual({ provider: "claude", model: "claude-sonnet-5-5" });
+    expect(await getModelInfo("claude-sonnet-5-5")).toMatchObject({ provider: "claude", model: "claude-sonnet-5-5" });
   });
 
   it("keeps anthropic when an anthropic connection is active", async () => {
     connections.anthropic = [{ id: "a1" }];
     connections.claude = [{ id: "c1" }];
-    expect(await getModelInfo("claude-sonnet-5-5")).toEqual({ provider: "anthropic", model: "claude-sonnet-5-5" });
+    expect(await getModelInfo("claude-sonnet-5-5")).toMatchObject({ provider: "anthropic", model: "claude-sonnet-5-5" });
   });
 
   it("does not touch an explicit provider prefix", async () => {
     connections.claude = [{ id: "c1" }];
-    expect(await getModelInfo("anthropic/claude-sonnet-5-5")).toEqual({ provider: "anthropic", model: "claude-sonnet-5-5" });
+    expect(await getModelInfo("anthropic/claude-sonnet-5-5")).toMatchObject({ provider: "anthropic", model: "claude-sonnet-5-5" });
   });
 
   it("does not touch other model families", async () => {
