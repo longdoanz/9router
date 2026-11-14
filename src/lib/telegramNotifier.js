@@ -49,11 +49,24 @@ function stripLeadingTime(line) {
  * logger.error() (src/sse/utils/logger.js) writes "❌" through console.log and
  * would otherwise be missed entirely.
  */
+// Lines matching this are suppressed even at ERROR level: they describe a
+// deterministic condition already handled elsewhere (long model-scoped lock +
+// clearAccountErrorStatus), so alerting on every occurrence is pure spam. The
+// canonical case is Codex rejecting a model an account's plan can't use —
+// the client sees the upstream error verbatim, no operator action exists
+// beyond editing the combo, which the lock already communicates via the
+// dashboard connection row.
+const SUPPRESSED_PATTERNS = [
+  /model is not supported when using codex with a chatgpt account/i,
+];
+
 function looksLikeError(level, line) {
+  const text = String(line);
+  if (SUPPRESSED_PATTERNS.some((re) => re.test(text))) return false;
   if (level === "error") return true;
   // console.assert(false, ...) lands on "assert" and is always a failure.
   if (level === "assert") return true;
-  return TELEGRAM_CONFIG.errorPattern.test(line);
+  return TELEGRAM_CONFIG.errorPattern.test(text);
 }
 
 class TelegramNotifier {

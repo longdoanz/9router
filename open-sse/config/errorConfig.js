@@ -56,6 +56,18 @@ export const TRANSIENT_COOLDOWN_MS = 30 * 1000;
 // Hard cap for provider-reported rate limit cooldown (e.g. codex resets_at can be 5-6h)
 export const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
 
+// Codex "model is not supported when using Codex with a ChatGPT account" is
+// deterministic per (account, model): the model stays unsupported until the
+// account's plan changes, so re-probing it after 30 minutes only regenerates
+// the same 400 (and the same Telegram alert) forever. Lock the model for a
+// long window instead. It is model-scoped, so other models on the same account
+// keep working, and a success on the locked model clears the lock immediately
+// (clearAccountErrorStatus runs per model).
+export const CODEX_UNSUPPORTED_MODEL_COOLDOWN_MS = envInt(
+  "CODEX_UNSUPPORTED_MODEL_COOLDOWN_MS",
+  12 * 60 * 60 * 1000
+);
+
 // Cooldown durations (ms)
 const COOLDOWN = {
   long: 2 * 60 * 1000,
@@ -80,7 +92,7 @@ const COOLDOWN = {
 export const ERROR_RULES = [
   // --- Text-based rules (checked first, order = priority) ---
   { text: "maximum context length",   noFallback: true },
-  { provider: "codex", text: "model is not supported when using codex with a chatgpt account", cooldownMs: MAX_RATE_LIMIT_COOLDOWN_MS },
+  { provider: "codex", text: "model is not supported when using codex with a chatgpt account", cooldownMs: CODEX_UNSUPPORTED_MODEL_COOLDOWN_MS, modelScoped: true },
   // Intl gateway blocks affect the account/IP, so let the connection back off.
   { provider: "codebuddy-intl", text: "request illegal", backoff: true },
   { provider: "codebuddy-intl", text: "conversation id missing", backoff: true },
