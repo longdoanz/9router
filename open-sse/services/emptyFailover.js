@@ -20,7 +20,7 @@ import { CLAUDE_BLOCK, RESPONSES_ITEM } from "../translator/schema/blocks.js";
 import { CLAUDE_EVENT, CLAUDE_DELTA, RESPONSES_EVENT, RESPONSES_EVENT_PREFIX } from "../translator/schema/streamEvents.js";
 import { toOpenAIFinish } from "../translator/concerns/finishReason.js";
 import { FORMATS } from "../translator/formats.js";
-import { EMPTY_PEEK_DEADLINE_MS } from "../config/runtimeConfig.js";
+import { EMPTY_PEEK_DEADLINE_MS, isPeekCommitOnReasoningEnabled } from "../config/runtimeConfig.js";
 import { parseSSELine } from "../utils/streamHelpers.js";
 
 // OpenAI chat content test. A chunk counts as content only if it carries
@@ -54,7 +54,7 @@ const nonEmptyString = (s) => typeof s === "string" && s.length > 0;
 
 // Anthropic Messages event.
 function inspectClaudeEvent(obj) {
-  let content = false, finishReason = null;
+  let content = false, finishReason = null, reasoning = false;
   if (obj.type === CLAUDE_EVENT.CONTENT_BLOCK_DELTA) {
     const d = obj.delta || {};
     if (d.type === CLAUDE_DELTA.TEXT && nonEmptyString(d.text)) content = true;
@@ -63,11 +63,12 @@ function inspectClaudeEvent(obj) {
     const b = obj.content_block || {};
     if (b.type === CLAUDE_BLOCK.TOOL_USE) content = true;
     if (b.type === CLAUDE_BLOCK.TEXT && nonEmptyString(b.text)) content = true;
+    if (b.type === CLAUDE_BLOCK.THINKING || b.type === CLAUDE_BLOCK.REDACTED_THINKING) reasoning = true; // fork
   } else if (obj.type === CLAUDE_EVENT.MESSAGE_DELTA && obj.delta?.stop_reason) {
     // refusal → content_filter (the translator renders content_filter as refusal for Claude clients)
     finishReason = toOpenAIFinish(obj.delta.stop_reason, FORMATS.CLAUDE);
   }
-  return { content, finishReason };
+  return { content, finishReason, reasoning };
 }
 
 // OpenAI Responses event. Tool calls are function_call / custom_tool_call output items or
@@ -79,7 +80,7 @@ const RESPONSES_INCOMPLETE_FINISH = {
   [RESPONSES_INCOMPLETE_REASON.MAX_OUTPUT_TOKENS]: OPENAI_FINISH.LENGTH,
 };
 function inspectResponsesEvent(obj) {
-  let content = false, finishReason = null;
+  let content = false, finishReason = null, reasoning = false;
   switch (obj.type) {
     case RESPONSES_EVENT.OUTPUT_TEXT_DELTA:
     case RESPONSES_EVENT.FUNCTION_CALL_ARGUMENTS_DELTA:
@@ -92,6 +93,7 @@ function inspectResponsesEvent(obj) {
     case RESPONSES_EVENT.OUTPUT_ITEM_ADDED:
     case RESPONSES_EVENT.OUTPUT_ITEM_DONE:
       content = RESPONSES_TOOL_ITEMS.has(obj.item?.type);
+      reasoning = obj.item?.type === RESPONSES_ITEM.REASONING; // fork
       break;
     case RESPONSES_EVENT.COMPLETED:
       finishReason = OPENAI_FINISH.STOP;
@@ -103,7 +105,7 @@ function inspectResponsesEvent(obj) {
       finishReason = RESPONSES_STATUS.FAILED;
       break;
   }
-  return { content, finishReason };
+  return { content, finishReason, reasoning };
 }
 
 // Inspect one complete client-format SSE line (parsed with the shared parseSSELine) and report
@@ -114,12 +116,14 @@ export function inspectSSELine(line) {
   if (typeof parsed.type === "string" && !Array.isArray(parsed.choices)) {
     return parsed.type.startsWith(RESPONSES_EVENT_PREFIX) ? inspectResponsesEvent(parsed) : inspectClaudeEvent(parsed);
   }
-  let content = false, finishReason = null;
+  let content = false, finishReason = null, reasoning = false;
   for (const choice of parsed.choices || []) {
     if (deltaHasClientContent(choice.delta || choice.message || {})) content = true;
+    const d = choice.delta || {}; // fork
+    if (nonEmptyString(d.reasoning_content) || nonEmptyString(d.reasoning)) reasoning = true;
     if (choice.finish_reason) finishReason = choice.finish_reason;
   }
-  return { content, finishReason };
+  return { content, finishReason, reasoning };
 }
 
 // Scan the COMPLETE lines of a decoded SSE buffer and update the running decision.
@@ -131,6 +135,7 @@ export function scanSSEBuffer(text, state = { sawContent: false, finishReason: n
   for (const line of lines) {
     const info = inspectSSELine(line);
     if (info.content) state.sawContent = true;
+    if (info.reasoning) state.sawReasoning = true; // fork
     if (info.finishReason) state.finishReason = info.finishReason;
   }
   return state;
@@ -149,7 +154,7 @@ export function isNoRetryFinish(finishReason) {
 // possibly-valid slow stream). Returns the decision, the buffered head bytes, the live reader,
 // and — if the deadline fired mid-read — the still-pending read() (`pendingRead`) so the caller
 // can resume from it WITHOUT abandoning the chunk it will deliver.
-export async function peekStreamForContent(body, { deadlineMs = EMPTY_PEEK_DEADLINE_MS } = {}) {
+export async function peekStreamForContent(body, { deadlineMs = EMPTY_PEEK_DEADLINE_MS, commitOnReasoning = isPeekCommitOnReasoningEnabled() } = {}) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   const headChunks = [];
@@ -190,8 +195,8 @@ export async function peekStreamForContent(body, { deadlineMs = EMPTY_PEEK_DEADL
     textBuf += decoder.decode(value, { stream: true });
     scanSSEBuffer(textBuf, state);
     textBuf = state.pending; // only the not-yet-complete line carries over
-    if (state.sawContent) {
-      return settle({ outcome: "content", timedOut: false, head: headChunks, reader, pendingRead: null, finishReason: state.finishReason });
+    if (state.sawContent || (commitOnReasoning && state.sawReasoning)) {
+      return settle({ outcome: "content", timedOut: false, head: headChunks, reader, pendingRead: null, finishReason: state.finishReason, onReasoning: !state.sawContent });
     }
   }
 }

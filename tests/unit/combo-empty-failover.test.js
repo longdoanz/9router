@@ -100,7 +100,26 @@ describe("peekStreamForContent", () => {
   });
 
   it("reasoning-only then abort → still empty (reasoning is not content)", async () => {
-    const p = await peekStreamForContent(sseStream([ROLE, REASONING, EMPTY_STOP, DONE]));
+    const p = await peekStreamForContent(sseStream([ROLE, REASONING, EMPTY_STOP, DONE]), { commitOnReasoning: false });
+    expect(p.outcome).toBe("empty");
+  });
+
+  // fork: commit as soon as reasoning streams, so extended thinking is not held for 20-45s
+  it("commitOnReasoning: first reasoning frame commits without waiting for later frames", async () => {
+    const p = await peekStreamForContent(sseStream([ROLE, REASONING, CONTENT, DONE], [0, 0, 5000]), { commitOnReasoning: true });
+    expect(p).toMatchObject({ outcome: "content", timedOut: false, onReasoning: true });
+  });
+  it("commitOnReasoning: Anthropic thinking block start commits", async () => {
+    const ev = (o) => `event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`;
+    const frames = [
+      ev({ type: "message_start", message: { id: "m", role: "assistant", content: [] } }),
+      ev({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } }),
+    ];
+    const p = await peekStreamForContent(sseStream([...frames, ev({ type: "message_stop" })], [0, 0, 5000]), { commitOnReasoning: true });
+    expect(p).toMatchObject({ outcome: "content", onReasoning: true });
+  });
+  it("commitOnReasoning: role/ping frames alone still do not commit", async () => {
+    const p = await peekStreamForContent(sseStream([ROLE, EMPTY_STOP, DONE]), { commitOnReasoning: true });
     expect(p.outcome).toBe("empty");
   });
 
@@ -344,10 +363,18 @@ describe("combo fall-through per client format (real combo.js + streaming pipeli
         const { tried } = await combo([[ROLE, TOOL, DONE], [ROLE, C("from-m1"), STOP, DONE]], fmt);
         expect(tried).toEqual(["openai/m0"]);
       });
-      it("reasoning-only first member falls through", async () => {
-        const { out, tried } = await combo([[ROLE, REASONING, STOP, DONE], [ROLE, C("from-m1"), STOP, DONE]], fmt);
-        expect(tried).toEqual(["openai/m0", "openai/m1"]);
-        expect(out).toContain("from-m1");
+      it("reasoning-only first member falls through (EMPTY_PEEK_COMMIT_ON_REASONING=off)", async () => {
+        process.env.EMPTY_PEEK_COMMIT_ON_REASONING = "off";
+        try {
+          const { out, tried } = await combo([[ROLE, REASONING, STOP, DONE], [ROLE, C("from-m1"), STOP, DONE]], fmt);
+          expect(tried).toEqual(["openai/m0", "openai/m1"]);
+          expect(out).toContain("from-m1");
+        } finally { delete process.env.EMPTY_PEEK_COMMIT_ON_REASONING; }
+      });
+      it("fork default: a member is committed on its reasoning (no wait for answer text)", async () => {
+        // reasoning-only member: committed (not fallen through) proves reasoning alone commits
+        const { tried } = await combo([[ROLE, REASONING, STOP, DONE], [ROLE, C("from-m1"), STOP, DONE]], fmt);
+        expect(tried).toEqual(["openai/m0"]);
       });
     });
   }

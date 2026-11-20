@@ -60,6 +60,15 @@ export const STREAM_FIRST_CHUNK_TIMEOUT_MS = envMs("STREAM_FIRST_CHUNK_TIMEOUT_M
 // Env: EMPTY_PEEK_DEADLINE_MS.
 export const EMPTY_PEEK_DEADLINE_MS = envMs("EMPTY_PEEK_DEADLINE_MS", 45 * 1000);
 
+// Fork: commit the combo peek as soon as the model streams reasoning/thinking instead of
+// buffering until the first answer token. Extended thinking runs 20-45s+, and holding it
+// made clients see nothing until text started. Cost: a think-then-abort stream no longer
+// falls through to the next combo member. Escape hatch: EMPTY_PEEK_COMMIT_ON_REASONING=off.
+export function isPeekCommitOnReasoningEnabled() {
+  const raw = String(process.env.EMPTY_PEEK_COMMIT_ON_REASONING ?? "").trim().toLowerCase();
+  return !(raw === "off" || raw === "0" || raw === "false" || raw === "no");
+}
+
 // Fetch connect timeout: abort if upstream doesn't return response headers within this duration
 export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1000);
 
