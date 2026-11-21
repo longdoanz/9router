@@ -110,6 +110,76 @@ function rawHeaderNameAt(rawPacket, offset) {
   return rawPacket.subarray(lineStart, colon).toString("latin1").replace(/[^\x21-\x7e]/g, "?");
 }
 
+// Per-socket record of the requests already served on it, for diagnosing parser
+// rejections that only make sense in light of the previous request on the same
+// connection (e.g. HPE_CLOSED_CONNECTION: data after a `Connection: close` one).
+const socketHistory = new WeakMap();
+
+function pathOnly(url) {
+  return String(url || "").split("?")[0].slice(0, 120);
+}
+
+function recordRequest(req, res) {
+  const socket = req.socket;
+  if (!socket) return;
+  const h = socketHistory.get(socket) || { served: 0 };
+  h.served += 1;
+  h.last = {
+    line: `${req.method} ${pathOnly(req.url)} HTTP/${req.httpVersion}`,
+    connection: req.headers.connection || "",
+    contentLength: req.headers["content-length"] || "",
+    transferEncoding: req.headers["transfer-encoding"] || "",
+    expect: req.headers.expect ? "yes" : "",
+    at: Date.now(),
+    readAtStart: socket.bytesRead,
+    readAtFinish: null,
+    finishedAt: null,
+    status: null,
+  };
+  const last = h.last;
+  // Never listen to req "data" here: that would switch the body stream to
+  // flowing mode before Next reads it. Socket byte counters are enough.
+  res.once("finish", () => { last.finishedAt = Date.now(); last.status = res.statusCode; last.readAtFinish = socket.bytesRead; });
+  socketHistory.set(socket, h);
+}
+
+// Shape of the rejected packet without any header value or body byte: its
+// length, where the parser stopped, the request line (path without query) and
+// the header names, plus the framing numbers that decide where a message ends.
+function describePacket(rawPacket, offset) {
+  if (!Buffer.isBuffer(rawPacket)) return "packet=n/a";
+  const text = rawPacket.toString("latin1");
+  const headEnd = text.indexOf("\r\n\r\n");
+  const head = headEnd >= 0 ? text.slice(0, headEnd) : text.slice(0, 4096);
+  const lines = head.split("\r\n");
+  const first = lines[0] || "";
+  const m = /^([A-Z]{3,10}) (\S+) (HTTP\/\d\.\d)$/.exec(first);
+  const reqLine = m ? `${m[1]} ${pathOnly(m[2])} ${m[3]}` : `<${first.length}B non-request-line>`;
+  const names = [];
+  let cl = "";
+  let te = "";
+  for (const line of lines.slice(1)) {
+    const i = line.indexOf(":");
+    if (i <= 0) continue;
+    const name = line.slice(0, i).replace(/[^\x21-\x7e]/g, "?").slice(0, 60);
+    names.push(name);
+    const lower = name.toLowerCase();
+    if (lower === "content-length") cl = line.slice(i + 1).trim().slice(0, 20);
+    if (lower === "transfer-encoding") te = line.slice(i + 1).trim().slice(0, 30);
+  }
+  return `packet=${rawPacket.length}B at=${offset} headEnd=${headEnd} line="${reqLine}" cl=${cl || "-"} te=${te || "-"} headers=[${names.join(",")}]`;
+}
+
+function describeHistory(socket) {
+  const h = socketHistory.get(socket);
+  const peer = `${socket.remoteAddress || "?"}:${socket.remotePort || "?"}`;
+  const io = `read=${socket.bytesRead ?? "?"}B written=${socket.bytesWritten ?? "?"}B`;
+  if (!h) return `peer=${peer} ${io} served=0`;
+  const l = h.last;
+  const ago = (t) => (t ? `${Date.now() - t}ms ago` : "not finished");
+  return `peer=${peer} ${io} served=${h.served} prev="${l.line}" prev.conn=${l.connection || "-"} prev.cl=${l.contentLength || "-"} prev.te=${l.transferEncoding || "-"} prev.expect=${l.expect || "-"} prev.readAtStart=${l.readAtStart}B prev.readAtFinish=${l.readAtFinish ?? "-"}B prev.status=${l.status ?? "-"} prev.started=${ago(l.at)} prev.finished=${ago(l.finishedAt)}`;
+}
+
 function handleClientError(err, socket) {
   if (err?.code === "ECONNRESET" || !socket.writable) {
     socket.destroy();
@@ -117,8 +187,22 @@ function handleClientError(err, socket) {
   }
   const code = err?.code || "UNKNOWN";
   const status = code === "HPE_HEADER_OVERFLOW" ? 431 : (code === "ERR_HTTP_REQUEST_TIMEOUT" ? 408 : 400);
-  const header = rawHeaderNameAt(err?.rawPacket, err?.bytesParsed);
+  const header = code === "HPE_CLOSED_CONNECTION" ? null : rawHeaderNameAt(err?.rawPacket, err?.bytesParsed);
   console.warn(`[http] rejected malformed request: ${code}${err?.reason ? ` (${err.reason})` : ""}${header ? ` in header "${header}"` : ""}`);
+  try {
+    console.warn(`[http]   ${describeHistory(socket)} | ${describePacket(err?.rawPacket, err?.bytesParsed)}`);
+  } catch { /* diagnostics must never break the error reply */ }
+  // A request is still being served on this socket (stray bytes arrived after a
+  // `Connection: close` request, while its response is in flight). Writing an
+  // error here would land in THAT response — the valid in-flight request would
+  // reach its client as a bare 400. Drop the stray bytes instead: the parser is
+  // done with this socket, and the in-flight response still finishes and closes
+  // the connection as its `Connection: close` asked.
+  const inFlight = socketHistory.get(socket)?.last;
+  if (inFlight && inFlight.finishedAt === null) {
+    console.warn("[http]   ignored: response to the previous request still in flight");
+    return;
+  }
   const reasons = {
     400: "Malformed HTTP request",
     408: "Request timeout",
@@ -161,6 +245,7 @@ http.createServer = (...args) => {
     req.headers["x-9r-real-ip"] = ip;
     req.headers["x-9r-peer-token"] = PEER_TOKEN;
     if (viaProxy) req.headers["x-9r-via-proxy"] = "1";
+    recordRequest(req, res);
     return handler(req, res);
   };
   const server = origCreate(...rest, wrapped);
