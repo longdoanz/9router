@@ -22,6 +22,28 @@ export function buildErrorBody(statusCode, message) {
   };
 }
 
+// Statuses that describe the client's request itself: retrying it unchanged fails
+// the same way, so they pass through to the client as-is.
+const REQUEST_FAULT_STATUSES = new Set([400, 404, 405, 413, 415, 422]);
+
+/**
+ * Status to show the client after every upstream attempt failed.
+ *
+ * A quota/rate limit stays 429. A request fault (bad payload, unknown model,
+ * context overflow) keeps its own status. Everything else — our upstream
+ * credential rejected (401/402/403), upstream 5xx, timeouts, empty generations —
+ * is a temporary condition on our side, so the client gets 503 and retries,
+ * instead of a 4xx that tells it the request is wrong.
+ * @param {number|null} status - Last upstream/attempt status
+ * @returns {number} Client-facing status code
+ */
+export function clientStatusForUpstreamFailure(status) {
+  const s = Number(status);
+  if (s === 429) return 429;
+  if (REQUEST_FAULT_STATUSES.has(s)) return s;
+  return 503;
+}
+
 /**
  * Create error Response object (for non-streaming)
  * @param {number} statusCode - HTTP status code

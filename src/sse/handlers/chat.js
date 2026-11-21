@@ -14,8 +14,10 @@ import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
 import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
-import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
+import { errorResponse, unavailableResponse, clientStatusForUpstreamFailure } from "open-sse/utils/error.js";
 import { upstreamResponseHeaders } from "open-sse/utils/upstreamHeaders.js";
+import { checkFallbackError } from "open-sse/services/accountFallback.js";
+import { resolveProviderId } from "@/shared/constants/providers.js";
 import { handleComboChat, handleFusionChat, detectRequiredCapabilities } from "open-sse/services/combo.js";
 import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActiveAdapterStrategy } from "open-sse/services/capacityAdapter.js";
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
@@ -295,7 +297,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
-        const status = HTTP_STATUS.SERVICE_UNAVAILABLE;
+        // Every account is cooling down: a quota/rate limit stays 429, anything else 503.
+        const status = lastStatus === 429 || (!lastStatus && /\[429\]/.test(String(errorMsg)))
+          ? HTTP_STATUS.RATE_LIMITED
+          : HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
         return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman, lastHeaders);
       }
@@ -304,7 +309,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
       }
       log.warn("CHAT", "No more accounts available", { provider });
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable", lastHeaders);
+      return errorResponse(clientStatusForUpstreamFailure(lastStatus), lastError || "All accounts unavailable", lastHeaders);
     }
 
     // Account selection shown in the unified "▶" line (acc:...)
@@ -404,6 +409,19 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       lastStatus = result.status;
       lastHeaders = upstreamResponseHeaders(result.response?.headers);
       continue;
+    }
+
+    // No account fallback happened. For a no-auth (shared free) connection that is
+    // because there is no other account to try, not because the request is at
+    // fault: keep a request fault's own status, but surface a quota/upstream
+    // failure as 429/503 so the client retries instead of reading a 4xx/502 as
+    // "your request is wrong".
+    if (credentials.connectionId === "noauth") {
+      const { shouldFallback: transient } = checkFallbackError(result.status, result.error, 0, resolveProviderId(provider));
+      const clientStatus = transient ? clientStatusForUpstreamFailure(result.status) : result.status;
+      if (clientStatus !== result.status) {
+        return errorResponse(clientStatus, `[${provider}/${model}] ${result.error}`, upstreamResponseHeaders(result.response?.headers));
+      }
     }
 
     return result.response;

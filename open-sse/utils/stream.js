@@ -96,6 +96,7 @@ export function createSSEStream(options = {}) {
   let openAIResponsesTerminalSeen = false;
   let openAIResponsesDoneSent = false;
   let streamDoneSent = false;  // track duplicate [DONE] across transform + flush
+  let openAIChatDoneSent = false;  // [DONE] actually written to a Chat Completions client
   let finalized = false;
   let completionFlushTimer = null;
 
@@ -578,6 +579,18 @@ export function createSSEStream(options = {}) {
           reqLogger?.appendConvertedChunk?.(doneOutput);
           controller.enqueue(sharedEncoder.encode(doneOutput));
           openAIResponsesDoneSent = true;
+          streamDoneSent = true;
+        }
+
+        // Chat Completions clients wait for the `data: [DONE]` sentinel to end the
+        // stream. A translated upstream (Claude, Gemini, ...) has its own terminal
+        // event and never sends one, and the upstream sentinel of an OpenAI-shaped
+        // upstream is consumed above rather than forwarded — so emit it here, once.
+        if (sourceFormat === FORMATS.OPENAI && !openAIChatDoneSent) {
+          const doneOutput = "data: [DONE]\n\n";
+          reqLogger?.appendConvertedChunk?.(doneOutput);
+          controller.enqueue(sharedEncoder.encode(doneOutput));
+          openAIChatDoneSent = true;
           streamDoneSent = true;
         }
 

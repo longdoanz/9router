@@ -145,7 +145,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   const clientRequestedStreaming = body.stream === true || sourceFormat === FORMATS.ANTIGRAVITY || sourceFormat === FORMATS.GEMINI || sourceFormat === FORMATS.GEMINI_CLI;
   const providerRequiresStreaming = PROVIDERS[provider]?.forceStream === true;
-  let stream = providerRequiresStreaming ? true : (body.stream !== false);
+  // OpenAI Chat Completions and Anthropic Messages both default `stream` to false:
+  // a client that omits it is asking for one JSON body, and answering with SSE
+  // breaks every spec-following SDK (they parse the body as JSON). Other wire
+  // formats keep the historical stream-unless-false default.
+  const specDefaultsToJson = sourceFormat === FORMATS.OPENAI || sourceFormat === FORMATS.CLAUDE;
+  let stream = providerRequiresStreaming
+    ? true
+    : (specDefaultsToJson ? body.stream === true : body.stream !== false);
 
   // Image generation models require non-streaming (Google v1internal:generateContent)
   const modelType = getModelType(alias, model);

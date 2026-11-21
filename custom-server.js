@@ -96,6 +96,47 @@ function startBackgroundTokenRefreshFromCustomServer() {
     });
 }
 
+// Node's HTTP parser rejects some requests (control characters in a header value,
+// an oversized header block, a malformed request line) before Next ever sees them.
+// With no listener Node writes a bare "400 Bad Request" with an empty body and logs
+// nothing, so the client gets a status with no reason and we get no trace. Answer
+// with the same JSON error envelope as every other route, and log the parser code
+// plus the header NAME it stopped in (never the value: it may be a credential).
+function rawHeaderNameAt(rawPacket, offset) {
+  if (!Buffer.isBuffer(rawPacket) || !Number.isInteger(offset)) return null;
+  const lineStart = rawPacket.lastIndexOf("\n", Math.max(offset - 1, 0)) + 1;
+  const colon = rawPacket.indexOf(":", lineStart);
+  if (colon < 0 || colon - lineStart > 100) return null;
+  return rawPacket.subarray(lineStart, colon).toString("latin1").replace(/[^\x21-\x7e]/g, "?");
+}
+
+function handleClientError(err, socket) {
+  if (err?.code === "ECONNRESET" || !socket.writable) {
+    socket.destroy();
+    return;
+  }
+  const code = err?.code || "UNKNOWN";
+  const status = code === "HPE_HEADER_OVERFLOW" ? 431 : (code === "ERR_HTTP_REQUEST_TIMEOUT" ? 408 : 400);
+  const header = rawHeaderNameAt(err?.rawPacket, err?.bytesParsed);
+  console.warn(`[http] rejected malformed request: ${code}${err?.reason ? ` (${err.reason})` : ""}${header ? ` in header "${header}"` : ""}`);
+  const reasons = {
+    400: "Malformed HTTP request",
+    408: "Request timeout",
+    431: "Request header fields too large",
+  };
+  const detail = header ? ` (invalid value in header "${header}")` : (err?.reason ? ` (${err.reason})` : "");
+  const body = JSON.stringify({
+    error: { message: `${reasons[status]}${detail}`, type: "invalid_request_error", code: code.toLowerCase() },
+  });
+  socket.end(
+    `HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\n` +
+    "Content-Type: application/json\r\n" +
+    `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+    "Connection: close\r\n\r\n" +
+    body,
+  );
+}
+
 // Wrap Next standalone HTTP server: derive client IP from the TCP socket
 // (unspoofable) and strip client-supplied forwarding headers so downstream
 // rate-limiting keys on the real peer address instead of attacker-controlled XFF.
@@ -123,6 +164,7 @@ http.createServer = (...args) => {
     return handler(req, res);
   };
   const server = origCreate(...rest, wrapped);
+  server.on("clientError", handleClientError);
   server.once("listening", () => {
     startBackgroundTokenRefreshFromCustomServer();
   });

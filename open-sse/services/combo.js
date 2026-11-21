@@ -469,6 +469,8 @@ export async function handleComboChat({
   let lastError = null;
   let earliestRetryAfter = null;
   let lastStatus = null;
+  // Every non-request-scoped failure status, to pick the client status at the end.
+  const failureStatuses = [];
   let requestScopedResult = null;
 
   for (let i = 0; i < rotatedModels.length; i++) {
@@ -514,6 +516,7 @@ export async function handleComboChat({
                   }
                   lastError = "Zero usable content";
                   lastStatus = 200;
+                  failureStatuses.push(502);
                   continue;
                 }
               } catch {
@@ -549,6 +552,7 @@ export async function handleComboChat({
         peeked.response.body?.cancel?.().catch(() => {});
         lastError = `empty generation (${reasonLabel})`;
         if (!lastStatus) lastStatus = 502;
+        failureStatuses.push(502);
         continue;
       }
 
@@ -614,6 +618,7 @@ export async function handleComboChat({
       // Fallback to next model
       lastError = errorText || String(result.status);
       if (!lastStatus) lastStatus = result.status;
+      failureStatuses.push(result.status);
       log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
     } catch (error) {
       // Catch unexpected exceptions to ensure fallback continues
@@ -622,6 +627,7 @@ export async function handleComboChat({
       }
       lastError = error.message || String(error);
       if (!lastStatus) lastStatus = 500;
+      failureStatuses.push(500);
       log.warn("COMBO", `Model ${modelStr} threw error, trying next`, { error: lastError });
     }
   }
@@ -636,12 +642,14 @@ export async function handleComboChat({
     return requestScopedResult;
   }
 
-  // All models failed
-  // Use 503 (Service Unavailable) rather than 406 (Not Acceptable) — 406 implies
-  // the request itself is invalid, but here the providers are simply unavailable
-  // or have no active credentials. 503 is more accurate and retryable by clients.
-  const allDisabled = lastError && lastError.toLowerCase().includes("no credentials");
-  const status = allDisabled ? 503 : (lastStatus || 503);
+  // All models failed, and none of them blamed the request (that case returned
+  // above). Whatever each member hit (quota, rejected credential, upstream 5xx,
+  // empty generation) is temporary on our side, so the client gets a retryable
+  // status, never the first member's arbitrary 4xx/502: 429 when every member was
+  // rate-limited, 503 otherwise.
+  const status = failureStatuses.length > 0 && failureStatuses.every((s) => Number(s) === 429)
+    ? 429
+    : 503;
   const msg = lastError || "All combo models unavailable";
 
   if (earliestRetryAfter) {
